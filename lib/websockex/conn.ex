@@ -201,9 +201,16 @@ defmodule WebSockex.Conn do
   """
   @spec build_request(__MODULE__.t(), key :: String.t()) :: {:ok, String.t()}
   def build_request(conn, key) do
+    host =
+      if conn.port in [80, 443] do
+        conn.host
+      else
+        "#{conn.host}:#{conn.port}"
+      end
+
     headers =
       ([
-         {"Host", conn.host},
+         {"Host", host},
          {"Connection", "Upgrade"},
          {"Upgrade", "websocket"},
          {"Sec-WebSocket-Version", "13"},
