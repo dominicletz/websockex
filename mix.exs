@@ -36,7 +36,7 @@ defmodule WebSockex.Mixfile do
   defp aliases do
     [
       lint: [
-        "compile",
+        "compile --warnings-as-errors",
         "format --check-formatted",
         "credo --only warning",
         "dialyzer"
