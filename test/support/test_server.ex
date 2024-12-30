@@ -23,7 +23,7 @@ defmodule WebSockex.TestServer do
 
     opts = [dispatch: dispatch({pid, agent_pid}), port: port, ref: ref]
 
-    case Plug.Adapters.Cowboy.http(__MODULE__, [], opts) do
+    case Plug.Cowboy.http(__MODULE__, [], opts) do
       {:ok, _} ->
         {:ok, {ref, url}}
 
@@ -46,7 +46,7 @@ defmodule WebSockex.TestServer do
       ref: ref
     ]
 
-    case Plug.Adapters.Cowboy.https(__MODULE__, [], opts) do
+    case Plug.Cowboy.https(__MODULE__, [], opts) do
       {:ok, _} ->
         {:ok, {ref, url}}
 
@@ -68,7 +68,7 @@ defmodule WebSockex.TestServer do
   end
 
   def shutdown(ref) do
-    Plug.Adapters.Cowboy.shutdown(ref)
+    Plug.Cowboy.shutdown(ref)
   end
 
   def receive_socket_pid do

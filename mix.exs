@@ -7,7 +7,7 @@ defmodule WebSockex.Mixfile do
       app: :websockex,
       name: "WebSockex",
       version: "0.4.4",
-      elixir: "~> 1.7",
+      elixir: "~> 1.11",
       description: "An Elixir WebSocket client",
       source_url: "https://github.com/Azolo/websockex",
       build_embedded: Mix.env() == :prod,
