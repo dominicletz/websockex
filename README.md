@@ -1,5 +1,7 @@
 # WebSockex
 
+![Build](https://github.com/dominicletz/websockex/actions/workflows/ci.yml/badge.svg)
+
 An Elixir Websocket Client.
 
 A simple implementation could be
