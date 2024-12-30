@@ -163,4 +163,4 @@ iex> EchoClient.echo(pid, "Hi")
 ```
 
 [special_process]: http://erlang.org/doc/design_principles/spec_proc.html
-[docs]: https://hexdocs.pm/websockex
+[docs]: https://hexdocs.pm/websockex_wt
