@@ -38,7 +38,8 @@ defmodule WebSockex.Mixfile do
       lint: [
         "compile",
         "format --check-formatted",
-        "credo --only warning"
+        "credo --only warning",
+        "dialyzer"
       ]
     ]
   end
@@ -49,7 +50,8 @@ defmodule WebSockex.Mixfile do
       {:cowboy, "~> 2.9", only: :test},
       {:plug_cowboy, "~> 2.5", only: :test},
       {:plug, "~> 1.12", only: :test},
-      {:credo, "~> 1.7", only: :dev, runtime: false}
+      {:credo, "~> 1.7", only: :dev, runtime: false},
+      {:dialyxir, "~> 1.4", only: :dev, runtime: false}
     ] ++ optional_deps(otp_release())
   end
 
