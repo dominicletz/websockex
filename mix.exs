@@ -3,6 +3,7 @@ defmodule WebSockex.Mixfile do
 
   def project do
     [
+      aliases: aliases(),
       app: :websockex,
       name: "WebSockex",
       version: "0.4.3",
@@ -32,12 +33,23 @@ defmodule WebSockex.Mixfile do
 
   defp applications(_), do: []
 
+  defp aliases do
+    [
+      lint: [
+        "compile",
+        "format --check-formatted",
+        "credo --only warning"
+      ]
+    ]
+  end
+
   defp deps do
     [
       {:ex_doc, "~> 0.27", only: :dev, runtime: false},
       {:cowboy, "~> 2.9", only: :test},
       {:plug_cowboy, "~> 2.5", only: :test},
-      {:plug, "~> 1.12", only: :test}
+      {:plug, "~> 1.12", only: :test},
+      {:credo, "~> 1.7", only: :dev, runtime: false}
     ] ++ optional_deps(otp_release())
   end
 
