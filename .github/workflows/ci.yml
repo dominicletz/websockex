@@ -1,0 +1,18 @@
+name: "CI"
+on: ["push", "pull_request"]
+
+jobs:
+  lint_and_test:
+    name: "Lint and test"
+    runs-on: "ubuntu-latest"
+    steps:
+    - uses: erlef/setup-beam@v1
+      with:
+        otp-version: latest
+        elixir-version: latest
+
+    - uses: actions/checkout@v1
+    - run: |
+        mix local.hex --force
+        mix deps.get
+        mix test
