@@ -362,7 +362,7 @@ defmodule WebSockex.Conn do
     |> Keyword.merge(socket_options)
   end
 
-  defp socket_connection_options(%{socket_options: socket_options}) do
+  defp socket_connection_options(%{socket_options: _socket_options}) do
     minimal_socket_connection_options()
   end
 
