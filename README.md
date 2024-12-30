@@ -34,7 +34,7 @@ Add `websockex` to your list of dependencies in `mix.exs`:
 
 ```elixir
 def deps do
-  [{:websockex_wt, "~> 0.4.4"}]
+  [{:websockex_wt, "~> 0.5.0"}]
 end
 ```
 
