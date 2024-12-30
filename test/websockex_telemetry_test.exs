@@ -6,7 +6,7 @@ defmodule WebSockexTelemetryTest do
       alias WebSockex.TestClient
 
       setup context do
-        unless context.telemetry_event do
+        if !context.telemetry_event do
           raise "Please set a :telemetry_event to subscribe to, as tag in your telemetry based tests"
         end
 

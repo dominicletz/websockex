@@ -178,7 +178,7 @@ defmodule WebSockex.Utils do
           :sys.debug_options(opts)
         catch
           _, _ ->
-            :error_logger.format('~p: ignoring bad debug options ~p~n', [name, opts])
+            :error_logger.format(~c"~p: ignoring bad debug options ~p~n", [name, opts])
             []
         end
 

@@ -238,7 +238,7 @@ defmodule WebSockex.Conn do
     with {:ok, buffer} <- wait_for_response(conn),
          {:ok, headers, buffer} <- decode_response(buffer) do
       # Send excess buffer back to the process
-      unless buffer == "" do
+      if buffer != "" do
         send(owner_pid, {transport(conn.conn_mod), conn.socket, buffer})
       end
 
