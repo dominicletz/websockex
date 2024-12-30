@@ -6,7 +6,7 @@ defmodule WebSockex.Mixfile do
       aliases: aliases(),
       app: :websockex,
       name: "WebSockex",
-      version: "0.4.3",
+      version: "0.4.4",
       elixir: "~> 1.7",
       description: "An Elixir WebSocket client",
       source_url: "https://github.com/Azolo/websockex",
