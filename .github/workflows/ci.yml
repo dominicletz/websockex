@@ -15,4 +15,5 @@ jobs:
     - run: |
         mix local.hex --force
         mix deps.get
+        mix lint
         mix test
