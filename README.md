@@ -38,16 +38,6 @@ def deps do
 end
 ```
 
-### With Elixir releases prior to version  1.4
-
-Ensure `websockex` is started before your application:
-
-```elixir
-def application do
-  [applications: [:websockex]]
-end
-```
-
 ## Why WebSockex?
 
 WebSockex was conceived after trying other libraries and realizing that I needed something tested, that actually
