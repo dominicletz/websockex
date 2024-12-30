@@ -3,8 +3,6 @@ defmodule WebSockex.Frame do
   Functions for parsing and encoding frames.
   """
 
-  import Bitwise
-
   @type opcode :: :text | :binary | :close | :ping | :pong
   @type close_code :: 1000..4999
 
