@@ -202,13 +202,14 @@ defmodule WebSockex.Conn do
   @spec build_request(__MODULE__.t(), key :: String.t()) :: {:ok, String.t()}
   def build_request(conn, key) do
     headers =
-      ([
-         {"Host", conn.host},
-         {"Connection", "Upgrade"},
-         {"Upgrade", "websocket"},
-         {"Sec-WebSocket-Version", "13"},
-         {"Sec-WebSocket-Key", key}
-       ] ++ conn.extra_headers)
+      (conn.extra_headers ++
+         [
+           {"Host", conn.host},
+           {"Connection", "Upgrade"},
+           {"Upgrade", "websocket"},
+           {"Sec-WebSocket-Version", "13"},
+           {"Sec-WebSocket-Key", key}
+         ])
       |> Enum.map(&format_header/1)
 
     # Build the request
