@@ -245,6 +245,7 @@ defmodule WebSockex.ConnTest do
   test "build_request" do
     conn = %WebSockex.Conn{
       host: "lime.com",
+      port: 80,
       path: "/coco",
       query: "nut=true",
       extra_headers: [{"X-Test", "Shoes"}]
@@ -252,14 +253,49 @@ defmodule WebSockex.ConnTest do
 
     {:ok, request} = WebSockex.Conn.build_request(conn, "pants")
 
-    assert request =~ ~r(GET /coco\?nut=true HTTP\/1.1\r\n)
-    assert request =~ ~r(Host: #{conn.host}\r\n)
-    assert request =~ ~r(Connection: Upgrade\r\n)
-    assert request =~ ~r(Sec-WebSocket-Version: 13\r\n)
-    assert request =~ ~r(Sec-WebSocket-Key: pants\r\n)
-    assert request =~ ~r(Upgrade: websocket\r\n)
-    assert request =~ ~r(X-Test: Shoes\r\n)
-    assert request =~ ~r(\r\n\r\n\z)
+    # Split request into lines for easier testing
+    [request_line | header_lines] = String.split(request, "\r\n")
+
+    # Check request line
+    assert request_line == "GET /coco?nut=true HTTP/1.1"
+
+    # Convert headers to a MapSet for order-independent comparison
+    headers = MapSet.new(header_lines -- [""])
+
+    # Check required headers are present
+    required_headers =
+      MapSet.new([
+        "Host: #{conn.host}",
+        "Connection: Upgrade",
+        "Upgrade: websocket",
+        "Sec-WebSocket-Version: 13",
+        "Sec-WebSocket-Key: pants",
+        "X-Test: Shoes"
+      ])
+
+    assert MapSet.subset?(required_headers, headers)
+
+    # Check request ends with double CRLF
+    assert String.ends_with?(request, "\r\n\r\n")
+
+    # Test with non-standard port
+    conn = %{conn | port: 9000}
+    {:ok, request} = WebSockex.Conn.build_request(conn, "pants")
+    [_request_line | header_lines] = String.split(request, "\r\n")
+    headers = MapSet.new(header_lines -- [""])
+
+    # Check host header includes port for non-standard port
+    required_headers =
+      MapSet.new([
+        "Host: #{conn.host}:#{conn.port}",
+        "Connection: Upgrade",
+        "Upgrade: websocket",
+        "Sec-WebSocket-Version: 13",
+        "Sec-WebSocket-Key: pants",
+        "X-Test: Shoes"
+      ])
+
+    assert MapSet.subset?(required_headers, headers)
   end
 
   test "controlling_process", %{conn: conn} do
