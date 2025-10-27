@@ -2,11 +2,10 @@ defmodule WebSockex.TestServer do
   Module.register_attribute(__MODULE__, :dialyzer, persist: true)
   use Plug.Router
 
-  @certfile Path.join([__DIR__, "priv", "websockex.cer"])
-  @keyfile Path.join([__DIR__, "priv", "websockex.key"])
-  @cacert Path.join([__DIR__, "priv", "websockexca.cer"])
-          |> File.read!()
-          |> :public_key.pem_decode()
+  @base_path Path.join([__DIR__, "priv"])
+  @certfile Path.join([@base_path, "websockex.cer"])
+  @keyfile Path.join([@base_path, "websockex.key"])
+  @cacertfile Path.join([@base_path, "websockexca.cer"])
 
   plug(:match)
   plug(:dispatch)
@@ -81,8 +80,12 @@ defmodule WebSockex.TestServer do
   end
 
   def cacerts do
-    [{:Certificate, cert, _}] = @cacert
-    [cert]
+    @cacertfile
+    |> File.read!()
+    |> :public_key.pem_decode()
+    |> case do
+      [{:Certificate, cert, _}] -> [cert]
+    end
   end
 
   defp dispatch(tuple) do
@@ -163,8 +166,13 @@ defmodule WebSockex.TestSocket do
     {:ok, state}
   end
 
-  def websocket_handle(:ping, state),
-    do: {:ok, state}
+  def websocket_handle(:ping, state) do
+    {:reply, :pong, state}
+  end
+
+  def websocket_handle({:ping, payload}, state) do
+    {:reply, {:pong, payload}, state}
+  end
 
   def websocket_handle(:pong, state) do
     send(state.pid, :received_pong)
@@ -174,6 +182,11 @@ defmodule WebSockex.TestSocket do
   def websocket_handle({:pong, payload}, %{ping_payload: ping_payload} = state)
       when payload == ping_payload do
     send(state.pid, :received_payload_pong)
+    {:ok, state}
+  end
+
+  # Add general handler for pong frames with payloads
+  def websocket_handle({:pong, _payload}, state) do
     {:ok, state}
   end
 
