@@ -9,7 +9,7 @@ jobs:
     - uses: erlef/setup-beam@v1
       with:
         otp-version: latest
-        elixir-version: latest
+        elixir-version: 1.18.4
 
     - uses: actions/checkout@v1
     - run: |
