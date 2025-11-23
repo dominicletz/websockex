@@ -63,10 +63,10 @@ defmodule WebSockex.Mixfile do
 
   defp package do
     %{
-      name: :websockex_wt,
+      name: :websockex,
       licenses: ["MIT"],
       maintainers: ["Dominic Letz"],
-      links: %{"GitHub" => "https://github.com/dominicletz/websockex"}
+      links: %{"GitHub" => "https://github.com/witchtails/websockex_wt"}
     }
   end
 
