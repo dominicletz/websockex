@@ -76,7 +76,12 @@ defmodule WebSockex.Conn do
           socket: socket | nil,
           socket_connect_timeout: non_neg_integer,
           socket_recv_timeout: non_neg_integer,
-          resp_headers: [header]
+          cacerts: [certification] | nil,
+          insecure: boolean,
+          resp_headers: [header],
+          ssl_options: [:ssl.tls_client_option()] | nil,
+          socket_options: [:gen_tcp.option()] | nil,
+          inet_family: :inet | :inet6
         }
 
   @doc """
