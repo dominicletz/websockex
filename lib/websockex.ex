@@ -644,7 +644,7 @@ defmodule WebSockex do
             sync_send(frame, from, parent, debug, state)
 
           {^transport, ^socket, message} ->
-            buffer = <<state.buffer::bitstring, message::bitstring>>
+            buffer = read_all_data(transport, socket, [message, state.buffer])
             websocket_loop(parent, debug, %{state | buffer: buffer})
 
           {:tcp_closed, ^socket} ->
@@ -661,6 +661,28 @@ defmodule WebSockex do
             common_handle({:handle_info, msg}, parent, debug, state)
         end
     end
+  end
+
+  defp read_all_data(transport, socket, buffer) do
+    receive do
+      {^transport, ^socket, message} ->
+        read_all_data(transport, socket, [message | buffer])
+    after
+      0 ->
+        :lists.reverse(buffer)
+        |> join_bitstrings()
+    end
+  end
+
+  defp join_bitstrings([a, b]), do: <<a::bitstring, b::bitstring>>
+  defp join_bitstrings([a]), do: a
+  defp join_bitstrings([]), do: <<>>
+
+  defp join_bitstrings(rest) do
+    {a, b} = Enum.split(rest, div(length(rest), 2))
+    a = join_bitstrings(a)
+    b = join_bitstrings(b)
+    <<a::bitstring, b::bitstring>>
   end
 
   defp close_loop(reason, parent, debug, %{conn: conn, timer_ref: timer_ref} = state) do
