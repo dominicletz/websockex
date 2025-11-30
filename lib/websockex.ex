@@ -28,6 +28,48 @@ defmodule WebSockex do
   end
   ```
 
+  ## Closing Connections
+
+  WebSockex connections can be closed gracefully by returning close tuples from
+  callback functions. The following callbacks support close returns:
+
+  - `c:handle_frame/2`
+  - `c:handle_cast/2`
+  - `c:handle_info/2`
+  - `c:handle_ping/2`
+  - `c:handle_pong/2`
+
+  ### Basic Close
+
+  Return `{:close, state}` to close with the default close code (1000):
+
+  ```
+  def handle_frame({:text, "quit"}, state) do
+    {:close, state}
+  end
+  ```
+
+  ### Close with Custom Code
+
+  Return `{:close, {close_code, message}, state}` to specify a close code and reason:
+
+  ```
+  def handle_frame({:text, "error"}, state) do
+    {:close, {4000, "Application error"}, state}
+  end
+  ```
+
+  Close codes are integers in specific ranges:
+  - `1000-1015` - Standard protocol codes (e.g., 1000 = normal, 1001 = going away, 1002 = protocol error, 1003 = unsupported data)
+  - `3000-3999` - Reserved for use by libraries, frameworks, and applications (registered with IANA)
+  - `4000-4999` - Private use for applications
+
+  Common standard codes include:
+  - `1000` - Normal closure
+  - `1001` - Going away
+  - `1002` - Protocol error
+  - `1003` - Unsupported data
+
   ## Supervision
 
   WebSockex is implemented as an OTP Special Process and as a result will fit

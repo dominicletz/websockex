@@ -94,8 +94,71 @@ However, the recommendation is to always use `start_link/3` and if necessary tra
 
 This is because `start/3` creates a detached process and has the capability to produce zombie processes outside of any
 application tree. This is generally a good piece of advice for any process, however since a module using WebSockex
-bevhaviour can be written as a self-sustaining tcp connection. I feel like it is even more important to express this
+behaviour can be written as a self-sustaining tcp connection. I feel like it is even more important to express this
 particular piece of advice here.
+
+## Closing Connections
+
+WebSockex provides several ways to close a WebSocket connection gracefully. Most of the callback functions support returning close tuples to initiate connection closure.
+
+### Basic Close
+
+The simplest way to close a connection is to return `{:close, state}` from any of the following callbacks:
+- `handle_frame/2`
+- `handle_cast/2`
+- `handle_info/2`
+- `handle_ping/2`
+- `handle_pong/2`
+
+```elixir
+def handle_frame({:text, "shutdown"}, state) do
+  {:close, state}
+end
+
+def handle_cast(:close, state) do
+  {:close, state}
+end
+```
+
+This will close the connection with the default close code `1000` (normal closure).
+
+### Close with Custom Code and Reason
+
+You can also specify a custom close code and reason message by returning `{:close, {close_code, message}, state}`:
+
+```elixir
+def handle_frame({:text, "error"}, state) do
+  {:close, {4000, "Custom application error"}, state}
+end
+```
+
+Valid close codes are integers in specific ranges:
+- `1000-1015` - Standard protocol codes (e.g., 1000 = normal, 1001 = going away, 1002 = protocol error, 1003 = unsupported data)
+- `3000-3999` - Reserved for use by libraries, frameworks, and applications (registered with IANA)
+- `4000-4999` - Private use for applications
+
+Some common standard codes include:
+- `1000` - Normal closure
+- `1001` - Going away
+- `1002` - Protocol error
+- `1003` - Unsupported data
+
+### Programmatic Close via Cast
+
+You can also close the connection by sending a cast message to the WebSockex process:
+
+```elixir
+# In your client module
+def close(pid) do
+  WebSockex.cast(pid, :close)
+end
+
+def handle_cast(:close, state) do
+  {:close, state}
+end
+```
+
+See the `examples/echo_client.exs` for a working example of connection closure.
 
 ## Telemetry
 
