@@ -24,7 +24,8 @@ defmodule WebSockex.Conn do
             insecure: true,
             resp_headers: [],
             ssl_options: nil,
-            socket_options: nil
+            socket_options: nil,
+            inet_family: :inet
 
   @type socket :: :gen_tcp.socket() | :ssl.sslsocket()
   @type header :: {field :: String.t(), value :: String.t()}
@@ -49,6 +50,8 @@ defmodule WebSockex.Conn do
     from socket, default #{@socket_recv_timeout_default} ms.
   - `:ssl_options` - extra options for an SSL connection
   - `:socket_options` - extra options for the TCP part of the connection
+  - `:inet_family` - Internet protocol family, `:inet` for IPv4 or `:inet6` for IPv6.
+    _Defaults to `:inet`_.
 
   [public_key]: http://erlang.org/doc/apps/public_key/using_public_key.html
   """
@@ -60,6 +63,7 @@ defmodule WebSockex.Conn do
           | {:socket_recv_timeout, non_neg_integer}
           | {:ssl_options, [:ssl.tls_client_option()]}
           | {:socket_options, [:gen_tcp.option()]}
+          | {:inet_family, :inet | :inet6}
 
   @type t :: %__MODULE__{
           conn_mod: :gen_tcp | :ssl,
@@ -72,7 +76,12 @@ defmodule WebSockex.Conn do
           socket: socket | nil,
           socket_connect_timeout: non_neg_integer,
           socket_recv_timeout: non_neg_integer,
-          resp_headers: [header]
+          cacerts: [certification] | nil,
+          insecure: boolean,
+          resp_headers: [header],
+          ssl_options: [:ssl.tls_client_option()] | nil,
+          socket_options: [:gen_tcp.option()] | nil,
+          inet_family: :inet | :inet6
         }
 
   @doc """
@@ -99,7 +108,8 @@ defmodule WebSockex.Conn do
         Keyword.get(opts, :socket_connect_timeout, @socket_connect_timeout_default),
       socket_recv_timeout: Keyword.get(opts, :socket_recv_timeout, @socket_recv_timeout_default),
       ssl_options: Keyword.get(opts, :ssl_options, nil),
-      socket_options: Keyword.get(opts, :socket_options, nil)
+      socket_options: Keyword.get(opts, :socket_options, nil),
+      inet_family: Keyword.get(opts, :inet_family, :inet)
     }
   end
 
@@ -348,28 +358,30 @@ defmodule WebSockex.Conn do
     end
   end
 
-  defp minimal_socket_connection_options() do
+  defp minimal_socket_connection_options(inet_family) do
     [
+      inet_family,
       mode: :binary,
       active: false,
       packet: 0
     ]
   end
 
-  defp socket_connection_options(%{socket_options: socket_options})
+  defp socket_connection_options(%{socket_options: socket_options, inet_family: inet_family})
        when not is_nil(socket_options) do
-    minimal_socket_connection_options()
+    minimal_socket_connection_options(inet_family)
     |> Keyword.merge(socket_options)
   end
 
-  defp socket_connection_options(%{socket_options: _socket_options}) do
-    minimal_socket_connection_options()
+  defp socket_connection_options(%{inet_family: inet_family}) do
+    minimal_socket_connection_options(inet_family)
   end
 
   # Crazy SSL Stuff (It will be normal SSL stuff when I figure out Erlang's ssl)
 
-  defp ssl_connection_options(%{ssl_options: ssl_options}) when not is_nil(ssl_options) do
+  defp ssl_connection_options(%{ssl_options: ssl_options, inet_family: inet_family}) when not is_nil(ssl_options) do
     [
+      inet_family,
       mode: :binary,
       active: false,
       packet: 0
@@ -377,8 +389,9 @@ defmodule WebSockex.Conn do
     |> Keyword.merge(ssl_options)
   end
 
-  defp ssl_connection_options(%{insecure: true}) do
+  defp ssl_connection_options(%{insecure: true, inet_family: inet_family}) do
     [
+      inet_family,
       :binary,
       active: false,
       packet: 0,
@@ -386,8 +399,9 @@ defmodule WebSockex.Conn do
     ]
   end
 
-  defp ssl_connection_options(%{cacerts: cacerts}) when cacerts != nil do
+  defp ssl_connection_options(%{cacerts: cacerts, inet_family: inet_family}) when cacerts != nil do
     [
+      inet_family,
       :binary,
       active: false,
       packet: 0,

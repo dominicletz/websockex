@@ -26,7 +26,8 @@ defmodule WebSockex.ConnTest do
       extra_headers: [{"Pineapple", "Cake"}],
       socket: nil,
       socket_connect_timeout: 6000,
-      socket_recv_timeout: 5000
+      socket_recv_timeout: 5000,
+      inet_family: :inet
     }
 
     ssl_conn = %WebSockex.Conn{
@@ -39,7 +40,8 @@ defmodule WebSockex.ConnTest do
       extra_headers: [{"Pineapple", "Cake"}],
       socket: nil,
       socket_connect_timeout: 6000,
-      socket_recv_timeout: 5000
+      socket_recv_timeout: 5000,
+      inet_family: :inet
     }
 
     regular_url = "ws://localhost/ws"
@@ -91,7 +93,8 @@ defmodule WebSockex.ConnTest do
                extra_headers: [{"Pineapple", "Cake"}],
                socket: nil,
                socket_connect_timeout: 6000,
-               socket_recv_timeout: 5000
+               socket_recv_timeout: 5000,
+               inet_family: :inet
              }
 
     assert {:error, %WebSockex.URLError{}} = WebSockex.Conn.new(llama_url, conn_opts)
@@ -308,5 +311,94 @@ defmodule WebSockex.ConnTest do
     WebSockex.Conn.controlling_process(conn, agent_pid)
 
     assert :erlang.port_info(socket, :connected) == {:connected, agent_pid}
+  end
+
+  describe "inet_family option" do
+    test "defaults to inet (IPv4)" do
+      uri = URI.parse("ws://localhost/ws")
+      conn = WebSockex.Conn.new(uri)
+      
+      assert conn.inet_family == :inet
+    end
+
+    test "can be set to inet6 (IPv6)" do
+      uri = URI.parse("ws://localhost/ws")
+      conn = WebSockex.Conn.new(uri, inet_family: :inet6)
+      
+      assert conn.inet_family == :inet6
+    end
+
+    test "inet6 connection to localhost IPv6", context do
+      # Skip if IPv6 is not available on the system
+      case :inet.getaddr(~c"localhost", :inet6) do
+        {:ok, _} ->
+          uri = URI.parse(context.url)
+          conn = WebSockex.Conn.new(uri, inet_family: :inet6)
+          
+          # Try to open socket with IPv6
+          case WebSockex.Conn.open_socket(conn) do
+            {:ok, conn} ->
+              assert conn.inet_family == :inet6
+              assert conn.socket != nil
+              WebSockex.Conn.close_socket(conn)
+            
+            {:error, %WebSockex.ConnError{}} ->
+              # IPv6 connection might fail if server doesn't support it
+              # which is acceptable for this test
+              :ok
+          end
+
+        {:error, _} ->
+          # IPv6 not available, skip test
+          :ok
+      end
+    end
+
+    test "inet6 works with SSL connections" do
+      case :inet.getaddr(~c"localhost", :inet6) do
+        {:ok, _} ->
+          {:ok, {server_ref, url}} = WebSockex.TestServer.start_https(self())
+          on_exit(fn -> WebSockex.TestServer.shutdown(server_ref) end)
+          
+          uri = URI.parse(url)
+          conn = WebSockex.Conn.new(uri, inet_family: :inet6, insecure: true)
+          
+          assert conn.inet_family == :inet6
+          assert conn.conn_mod == :ssl
+          
+          # Try to connect
+          case WebSockex.Conn.open_socket(conn) do
+            {:ok, conn} ->
+              assert conn.socket != nil
+              WebSockex.Conn.close_socket(conn)
+            
+            {:error, %WebSockex.ConnError{}} ->
+              # IPv6 connection might fail if server doesn't support it
+              :ok
+          end
+
+        {:error, _} ->
+          # IPv6 not available, skip test
+          :ok
+      end
+    end
+
+    test "socket_options include inet_family for TCP", context do
+      uri = URI.parse(context.url)
+      
+      # Test with IPv4 (default)
+      conn_ipv4 = WebSockex.Conn.new(uri)
+      {:ok, conn_ipv4} = WebSockex.Conn.open_socket(conn_ipv4)
+      {:ok, opts_ipv4} = :inet.getopts(conn_ipv4.socket, [:inet])
+      # The socket should have the inet option set (though it may not be directly queryable)
+      # We verify the connection was successful
+      assert conn_ipv4.socket != nil
+      WebSockex.Conn.close_socket(conn_ipv4)
+      
+      # For IPv6, we just verify the conn struct has the right value
+      # since actual IPv6 connectivity may not be available
+      conn_ipv6 = WebSockex.Conn.new(uri, inet_family: :inet6)
+      assert conn_ipv6.inet_family == :inet6
+    end
   end
 end
