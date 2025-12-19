@@ -1411,4 +1411,29 @@ defmodule WebSockexTest do
       assert ChildSpecTest.child_spec(1) == "hippo"
     end
   end
+
+  describe "close_output" do
+    test "returns error when trying to send after close_output", context do
+      assert {:ok, :ok} = WebSockex.close_output(context.pid)
+
+      # Sending should fail after close_output
+      assert {:error, %WebSockex.NotConnectedError{connection_state: :output_closed}} =
+               WebSockex.send_frame(context.pid, {:text, "Should fail"})
+    end
+
+    test "works with custom close code and message", context do
+      assert {:ok, :ok} = WebSockex.close_output(context.pid, {1000, "Done sending"})
+
+      # Sending should fail
+      assert {:error, %WebSockex.NotConnectedError{connection_state: :output_closed}} =
+               WebSockex.send_frame(context.pid, {:text, "Should fail"})
+    end
+
+    test "completes close handshake when server closes", context do
+      assert {:ok, :ok} = WebSockex.close_output(context.pid)
+
+      # Server will have responded to our close frame, completing the handshake
+      assert_receive :normal_remote_closed, 500
+    end
+  end
 end

@@ -126,6 +126,14 @@ defmodule WebSockex.NotConnectedError do
   def message(%__MODULE__{connection_state: :opening}) do
     "Not Connected: Currently Opening the Connection."
   end
+
+  def message(%__MODULE__{connection_state: :closing}) do
+    "Not Connected: Connection is Closing."
+  end
+
+  def message(%__MODULE__{connection_state: :output_closed}) do
+    "Not Connected: Output has been closed (half-close in progress)."
+  end
 end
 
 defmodule WebSockex.CallingSelfError do
