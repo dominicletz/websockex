@@ -555,8 +555,8 @@ defmodule WebSockex do
     close_loop(reason, parent, debug, Map.delete(state, :connection_status))
   end
 
-  def system_continue(parent, debug, %{connection_status: :output_closed, close_reason: reason} = state) do
-     output_closed_loop(reason, parent, debug, Map.drop(state, [:connection_status, :close_reason]))
+  def system_continue(parent, debug, %{connection_status: :output_closed} = state) do
+     websocket_loop(parent, debug, Map.delete(state, :connection_status))
   end
 
   @doc false
@@ -655,7 +655,8 @@ defmodule WebSockex do
       name: name,
       reply_fun: reply_fun,
       buffer: <<>>,
-      fragment: nil
+      fragment: nil,
+      output_closed_reason: nil
     }
 
     handle_conn_failure = Keyword.get(opts, :handle_initial_conn_failure, false)
@@ -714,6 +715,8 @@ defmodule WebSockex do
   end
 
   defp websocket_loop(parent, debug, state) do
+    output_closed? = Map.get(state, :output_closed_reason) != nil
+
     case WebSockex.Frame.parse_frame(state.buffer) do
       {:ok, frame, buffer} ->
         debug = Utils.sys_debug(debug, {:in, :frame, frame}, state)
@@ -728,7 +731,8 @@ defmodule WebSockex do
 
         receive do
           {:system, from, req} ->
-            state = Map.put(state, :connection_status, :connected)
+            connection_status = if output_closed?, do: :output_closed, else: :connected
+            state = Map.put(state, :connection_status, connection_status)
             :sys.handle_system_msg(req, from, parent, __MODULE__, debug, state)
 
           {:"$websockex_cast", msg} ->
@@ -736,10 +740,21 @@ defmodule WebSockex do
             common_handle({:handle_cast, msg}, parent, debug, state)
 
           {:"$websockex_send", from, frame} ->
-            sync_send(frame, from, parent, debug, state)
+            if output_closed? do
+              :gen.reply(from, {:error, %WebSockex.NotConnectedError{connection_state: :output_closed}})
+              websocket_loop(parent, debug, state)
+            else
+              sync_send(frame, from, parent, debug, state)
+            end
 
           {:"$websockex_close_output", from, close_frame} ->
-            handle_close_output(close_frame, from, parent, debug, state)
+            if output_closed? do
+              # Already closed output
+              :gen.reply(from, {:ok, :ok})
+              websocket_loop(parent, debug, state)
+            else
+              handle_close_output(close_frame, from, parent, debug, state)
+            end
 
           {^transport, ^socket, message} ->
             buffer = read_all_data(transport, socket, [message, state.buffer])
@@ -792,8 +807,8 @@ defmodule WebSockex do
       :ok ->
         debug = Utils.sys_debug(debug, {:socket_out, :close, close_reason}, state)
         :gen.reply(from, {:ok, :ok})
-        # Enter the output_closed_loop which still processes incoming frames
-        output_closed_loop(close_reason, parent, debug, state)
+        # Mark output as closed and continue in websocket_loop
+        websocket_loop(parent, debug, %{state | output_closed_reason: close_reason})
 
       {:error, %WebSockex.ConnError{original: reason}} when reason in [:closed, :einval] ->
         :gen.reply(from, {:error, %WebSockex.NotConnectedError{connection_state: :closing}})
@@ -807,186 +822,6 @@ defmodule WebSockex do
 
   defp build_close_reason(nil), do: {:local, :normal}
   defp build_close_reason({code, message}), do: {:local, code, message}
-
-  # Loop that processes incoming frames after close_output has been called
-  # This is similar to websocket_loop but:
-  # - Rejects outgoing frames (output is closed)
-  # - Still processes incoming frames via callbacks
-  # - Completes close when remote close frame is received
-  defp output_closed_loop(close_reason, parent, debug, state) do
-    case WebSockex.Frame.parse_frame(state.buffer) do
-      {:ok, frame, buffer} ->
-        debug = Utils.sys_debug(debug, {:in, :frame, frame}, state)
-        execute_telemetry([:websockex, :frame, :received], state, %{frame: frame})
-        handle_frame_output_closed(frame, close_reason, parent, debug, %{state | buffer: buffer})
-
-      :incomplete ->
-        transport = state.conn.transport
-        socket = state.conn.socket
-
-        receive do
-          {:system, from, req} ->
-            state = state
-              |> Map.put(:connection_status, :output_closed)
-              |> Map.put(:close_reason, close_reason)
-            :sys.handle_system_msg(req, from, parent, __MODULE__, debug, state)
-
-          {:"$websockex_cast", msg} ->
-            # Still allow casts - they might be for receiving-side handling
-            debug = Utils.sys_debug(debug, {:in, :cast, msg}, state)
-            common_handle_output_closed({:handle_cast, msg}, close_reason, parent, debug, state)
-
-          {:"$websockex_send", from, _frame} ->
-            :gen.reply(from, {:error, %WebSockex.NotConnectedError{connection_state: :output_closed}})
-            output_closed_loop(close_reason, parent, debug, state)
-
-          {:"$websockex_close_output", from, _close_frame} ->
-            # Already closed output
-            :gen.reply(from, {:ok, :ok})
-            output_closed_loop(close_reason, parent, debug, state)
-
-          {^transport, ^socket, message} ->
-            buffer = read_all_data(transport, socket, [message, state.buffer])
-            output_closed_loop(close_reason, parent, debug, %{state | buffer: buffer})
-
-          {:tcp_closed, ^socket} ->
-            handle_close({:remote, :closed}, parent, debug, state)
-
-          {:ssl_closed, ^socket} ->
-            handle_close({:remote, :closed}, parent, debug, state)
-
-          {:EXIT, ^parent, reason} ->
-            terminate(reason, parent, debug, state)
-
-          msg ->
-            debug = Utils.sys_debug(debug, {:in, :msg, msg}, state)
-            common_handle_output_closed({:handle_info, msg}, close_reason, parent, debug, state)
-        end
-    end
-  end
-
-  # Handle frames when output is closed - process normally except close completes the handshake
-  defp handle_frame_output_closed(:close, _close_reason, parent, debug, state) do
-    # Remote sent close, complete the close handshake
-    handle_close({:remote, :normal}, parent, debug, state)
-  end
-
-  defp handle_frame_output_closed({:close, code, reason}, _close_reason, parent, debug, state) do
-    # Remote sent close with code/reason, complete the close handshake
-    handle_close({:remote, code, reason}, parent, debug, state)
-  end
-
-  defp handle_frame_output_closed(:ping, close_reason, parent, debug, state) do
-    common_handle_output_closed({:handle_ping, :ping}, close_reason, parent, debug, state)
-  end
-
-  defp handle_frame_output_closed({:ping, msg}, close_reason, parent, debug, state) do
-    common_handle_output_closed({:handle_ping, {:ping, msg}}, close_reason, parent, debug, state)
-  end
-
-  defp handle_frame_output_closed(:pong, close_reason, parent, debug, state) do
-    common_handle_output_closed({:handle_pong, :pong}, close_reason, parent, debug, state)
-  end
-
-  defp handle_frame_output_closed({:pong, msg}, close_reason, parent, debug, state) do
-    common_handle_output_closed({:handle_pong, {:pong, msg}}, close_reason, parent, debug, state)
-  end
-
-  defp handle_frame_output_closed({:fragment, _, _} = fragment, close_reason, parent, debug, state) do
-    handle_fragment_output_closed(fragment, close_reason, parent, debug, state)
-  end
-
-  defp handle_frame_output_closed({:continuation, _} = fragment, close_reason, parent, debug, state) do
-    handle_fragment_output_closed(fragment, close_reason, parent, debug, state)
-  end
-
-  defp handle_frame_output_closed({:finish, _} = fragment, close_reason, parent, debug, state) do
-    handle_fragment_output_closed(fragment, close_reason, parent, debug, state)
-  end
-
-  defp handle_frame_output_closed(frame, close_reason, parent, debug, state) do
-    common_handle_output_closed({:handle_frame, frame}, close_reason, parent, debug, state)
-  end
-
-  # Fragment handling in output_closed state - mirror the normal fragment handlers
-  defp handle_fragment_output_closed({:fragment, type, part}, close_reason, parent, debug, %{fragment: nil} = state) do
-    output_closed_loop(close_reason, parent, debug, %{state | fragment: {type, part}})
-  end
-
-  defp handle_fragment_output_closed({:fragment, _, _}, _close_reason, parent, debug, state) do
-    handle_close(
-      {:local, 1002, "Endpoint tried to start a fragment without finishing another"},
-      parent,
-      debug,
-      state
-    )
-  end
-
-  defp handle_fragment_output_closed({:continuation, _}, _close_reason, parent, debug, %{fragment: nil} = state) do
-    handle_close(
-      {:local, 1002, "Endpoint sent a continuation frame without starting a fragment"},
-      parent,
-      debug,
-      state
-    )
-  end
-
-  defp handle_fragment_output_closed({:continuation, next}, close_reason, parent, debug, %{fragment: {type, part}} = state) do
-    output_closed_loop(close_reason, parent, debug, %{state | fragment: {type, <<part::binary, next::binary>>}})
-  end
-
-  defp handle_fragment_output_closed({:finish, last}, _close_reason, parent, debug, %{fragment: nil} = state) do
-    handle_close(
-      {:local, 1002, "Endpoint finished a fragment without starting one. Payload: #{inspect(last)}"},
-      parent,
-      debug,
-      state
-    )
-  end
-
-  defp handle_fragment_output_closed({:finish, last}, close_reason, parent, debug, %{fragment: {type, part}} = state) do
-    frame = {type, <<part::binary, last::binary>>}
-    handle_frame_output_closed(frame, close_reason, parent, debug, %{state | fragment: nil})
-  end
-
-  # Common callback handling in output_closed state
-  # Similar to common_handle but returns to output_closed_loop and rejects replies
-  defp common_handle_output_closed({function, msg}, close_reason, parent, debug, state) do
-    result = try_callback(state.module, function, [msg, state.module_state])
-
-    case result do
-      {:ok, new_state} ->
-        output_closed_loop(close_reason, parent, debug, %{state | module_state: new_state})
-
-      {:reply, _frame, new_state} ->
-        # Can't send frames when output is closed, just continue
-        debug = Utils.sys_debug(debug, {:reply_ignored, function}, state)
-        output_closed_loop(close_reason, parent, debug, %{state | module_state: new_state})
-
-      {:close, new_state} ->
-        # Already closing, just complete
-        handle_close({:local, :normal}, parent, debug, %{state | module_state: new_state})
-
-      {:close, {close_code, message}, new_state} ->
-        handle_close({:local, close_code, message}, parent, debug, %{
-          state
-          | module_state: new_state
-        })
-
-      {:error, error} ->
-        state = %{
-          state
-          | catch_state: %{
-              module: state.module,
-              callback: function,
-              args: [msg, state.module_state],
-              error: error
-            }
-        }
-
-        terminate(error, parent, debug, state)
-    end
-  end
 
   defp close_loop(reason, parent, debug, %{conn: conn, timer_ref: timer_ref} = state) do
     transport = state.conn.transport
@@ -1126,6 +961,7 @@ defmodule WebSockex do
   end
 
   defp common_handle({function, msg}, parent, debug, state) do
+    output_closed? = Map.get(state, :output_closed_reason) != nil
     result = try_callback(state.module, function, [msg, state.module_state])
 
     case result do
@@ -1133,18 +969,24 @@ defmodule WebSockex do
         websocket_loop(parent, debug, %{state | module_state: new_state})
 
       {:reply, frame, new_state} ->
-        # A `with` that includes `else` clause isn't tail recursive (elixir-lang/elixir#6251)
-        res =
-          with {:ok, binary_frame} <- WebSockex.Frame.encode_frame(frame),
-               do: WebSockex.Conn.socket_send(state.conn, binary_frame)
+        if output_closed? do
+          # Can't send frames when output is closed, just continue
+          debug = Utils.sys_debug(debug, {:reply_ignored, function}, state)
+          websocket_loop(parent, debug, %{state | module_state: new_state})
+        else
+          # A `with` that includes `else` clause isn't tail recursive (elixir-lang/elixir#6251)
+          res =
+            with {:ok, binary_frame} <- WebSockex.Frame.encode_frame(frame),
+                 do: WebSockex.Conn.socket_send(state.conn, binary_frame)
 
-        case res do
-          :ok ->
-            debug = Utils.sys_debug(debug, {:reply, function, frame}, state)
-            websocket_loop(parent, debug, %{state | module_state: new_state})
+          case res do
+            :ok ->
+              debug = Utils.sys_debug(debug, {:reply, function, frame}, state)
+              websocket_loop(parent, debug, %{state | module_state: new_state})
 
-          {:error, error} ->
-            handle_close({:error, error}, parent, debug, %{state | module_state: new_state})
+            {:error, error} ->
+              handle_close({:error, error}, parent, debug, %{state | module_state: new_state})
+          end
         end
 
       {:close, new_state} ->
