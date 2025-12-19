@@ -798,6 +798,10 @@ defmodule WebSockex do
       {:error, %WebSockex.ConnError{original: reason}} when reason in [:closed, :einval] ->
         :gen.reply(from, {:error, %WebSockex.NotConnectedError{connection_state: :closing}})
         handle_close({:remote, :closed}, parent, debug, state)
+
+      {:error, reason} ->
+        :gen.reply(from, {:error, reason})
+        websocket_loop(parent, debug, state)
     end
   end
 
