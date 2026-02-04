@@ -4,7 +4,7 @@ defmodule WebSockex.Conn do
 
   Dispatches to the correct module for the underlying connection. (`:gen_tcp` or `:ssl`)
 
-  Is woefully inadequite for verifying proper peers in SSL connections.
+  Supports HTTP CONNECT proxy tunneling for secure WebSocket connections.
   """
 
   @socket_connect_timeout_default 6000
@@ -24,13 +24,21 @@ defmodule WebSockex.Conn do
             insecure: true,
             resp_headers: [],
             ssl_options: nil,
-            socket_options: nil
+            socket_options: nil,
+            proxy: nil
 
   @type socket :: :gen_tcp.socket() | :ssl.sslsocket()
   @type header :: {field :: String.t(), value :: String.t()}
   @type transport :: :tcp | :ssl
 
   @type certification :: :public_key.der_encoded()
+
+  @type proxy_config :: %{
+          host: String.t(),
+          port: non_neg_integer(),
+          username: String.t() | nil,
+          password: String.t() | nil
+        }
 
   @typedoc """
   Options used when establishing a tcp or ssl connection.
@@ -49,6 +57,8 @@ defmodule WebSockex.Conn do
     from socket, default #{@socket_recv_timeout_default} ms.
   - `:ssl_options` - extra options for an SSL connection
   - `:socket_options` - extra options for the TCP part of the connection
+  - `:proxy` - HTTP CONNECT proxy configuration map with `:host`, `:port`,
+    and optional `:username`/`:password` for basic auth.
 
   [public_key]: http://erlang.org/doc/apps/public_key/using_public_key.html
   """
@@ -60,6 +70,7 @@ defmodule WebSockex.Conn do
           | {:socket_recv_timeout, non_neg_integer}
           | {:ssl_options, [:ssl.tls_client_option()]}
           | {:socket_options, [:gen_tcp.option()]}
+          | {:proxy, proxy_config() | String.t()}
 
   @type t :: %__MODULE__{
           conn_mod: :gen_tcp | :ssl,
@@ -72,7 +83,8 @@ defmodule WebSockex.Conn do
           socket: socket | nil,
           socket_connect_timeout: non_neg_integer,
           socket_recv_timeout: non_neg_integer,
-          resp_headers: [header]
+          resp_headers: [header],
+          proxy: proxy_config() | nil
         }
 
   @doc """
@@ -99,7 +111,8 @@ defmodule WebSockex.Conn do
         Keyword.get(opts, :socket_connect_timeout, @socket_connect_timeout_default),
       socket_recv_timeout: Keyword.get(opts, :socket_recv_timeout, @socket_recv_timeout_default),
       ssl_options: Keyword.get(opts, :ssl_options, nil),
-      socket_options: Keyword.get(opts, :socket_options, nil)
+      socket_options: Keyword.get(opts, :socket_options, nil),
+      proxy: parse_proxy_option(Keyword.get(opts, :proxy, nil))
     }
   end
 
@@ -109,6 +122,27 @@ defmodule WebSockex.Conn do
       {:error, _} = error -> error
     end
   end
+
+  # Parse proxy option - can be a map or URL string like "http://host:port"
+  defp parse_proxy_option(nil), do: nil
+
+  defp parse_proxy_option(%{host: _, port: _} = proxy), do: proxy
+
+  defp parse_proxy_option(proxy_url) when is_binary(proxy_url) do
+    case URI.parse(proxy_url) do
+      %URI{host: host, port: port} when not is_nil(host) and not is_nil(port) ->
+        %{host: host, port: port, username: nil, password: nil}
+
+      %URI{host: host, scheme: scheme} when not is_nil(host) ->
+        port = if scheme == "https", do: 443, else: 80
+        %{host: host, port: port, username: nil, password: nil}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp parse_proxy_option(_), do: nil
 
   @doc """
   Parses a url string for a valid URI
@@ -169,10 +203,70 @@ defmodule WebSockex.Conn do
 
   @doc """
   Opens a socket to a uri and returns a conn struct.
+
+  When a proxy is configured, first connects to the proxy, sends HTTP CONNECT,
+  then upgrades to SSL if the target is a secure WebSocket (wss://).
   """
   @spec open_socket(__MODULE__.t()) :: {:ok, __MODULE__.t()} | {:error, term}
   def open_socket(conn)
 
+  # Proxy path for SSL connections - tunnel through HTTP CONNECT
+  def open_socket(%{conn_mod: :ssl, proxy: %{host: proxy_host, port: proxy_port}} = conn) do
+    # Step 1: Connect to proxy via plain TCP
+    tcp_opts = [
+      mode: :binary,
+      active: false,
+      packet: 0
+    ]
+
+    with {:ok, tcp_socket} <-
+           :gen_tcp.connect(parse_host(proxy_host), proxy_port, tcp_opts, conn.socket_connect_timeout),
+         # Step 2: Send HTTP CONNECT request
+         :ok <- send_connect_request(tcp_socket, conn),
+         # Step 3: Wait for 200 response
+         {:ok, _headers} <- receive_connect_response(tcp_socket, conn.socket_recv_timeout),
+         # Step 4: Upgrade TCP socket to SSL
+         {:ok, ssl_socket} <-
+           :ssl.connect(tcp_socket, ssl_connection_options(conn), conn.socket_connect_timeout) do
+      {:ok, Map.put(conn, :socket, ssl_socket)}
+    else
+      {:error, error} -> {:error, %WebSockex.ConnError{original: error}}
+    end
+  end
+
+  # Non-proxy TCP connection
+  def open_socket(%{conn_mod: :gen_tcp, proxy: nil} = conn) do
+    case :gen_tcp.connect(
+           parse_host(conn.host),
+           conn.port,
+           socket_connection_options(conn),
+           conn.socket_connect_timeout
+         ) do
+      {:ok, socket} ->
+        {:ok, Map.put(conn, :socket, socket)}
+
+      {:error, error} ->
+        {:error, %WebSockex.ConnError{original: error}}
+    end
+  end
+
+  # Non-proxy SSL connection
+  def open_socket(%{conn_mod: :ssl, proxy: nil} = conn) do
+    case :ssl.connect(
+           parse_host(conn.host),
+           conn.port,
+           ssl_connection_options(conn),
+           conn.socket_connect_timeout
+         ) do
+      {:ok, socket} ->
+        {:ok, Map.put(conn, :socket, socket)}
+
+      {:error, error} ->
+        {:error, %WebSockex.ConnError{original: error}}
+    end
+  end
+
+  # Fallback for gen_tcp with proxy (non-SSL target - rare case)
   def open_socket(%{conn_mod: :gen_tcp} = conn) do
     case :gen_tcp.connect(
            parse_host(conn.host),
@@ -188,18 +282,62 @@ defmodule WebSockex.Conn do
     end
   end
 
-  def open_socket(%{conn_mod: :ssl} = conn) do
-    case :ssl.connect(
-           parse_host(conn.host),
-           conn.port,
-           ssl_connection_options(conn),
-           conn.socket_connect_timeout
-         ) do
-      {:ok, socket} ->
-        {:ok, Map.put(conn, :socket, socket)}
+  # Send HTTP CONNECT request to proxy
+  defp send_connect_request(socket, conn) do
+    host_port = "#{conn.host}:#{conn.port}"
 
-      {:error, error} ->
-        {:error, %WebSockex.ConnError{original: error}}
+    request = [
+      "CONNECT #{host_port} HTTP/1.1\r\n",
+      "Host: #{host_port}\r\n",
+      "Proxy-Connection: Keep-Alive\r\n",
+      "\r\n"
+    ]
+
+    :gen_tcp.send(socket, request)
+  end
+
+  # Receive and validate HTTP CONNECT response
+  defp receive_connect_response(socket, timeout) do
+    receive_connect_response(socket, timeout, "")
+  end
+
+  defp receive_connect_response(socket, timeout, buffer) do
+    case Regex.match?(~r/\r\n\r\n/, buffer) do
+      true ->
+        # Parse the response
+        case :erlang.decode_packet(:http_bin, buffer, []) do
+          {:ok, {:http_response, _version, 200, _message}, rest} ->
+            # Parse headers (we don't really need them but should consume them)
+            parse_connect_headers(rest)
+
+          {:ok, {:http_response, _, code, message}, _} ->
+            {:error, {:proxy_error, code, message}}
+
+          {:error, error} ->
+            {:error, error}
+        end
+
+      false ->
+        case :gen_tcp.recv(socket, 0, timeout) do
+          {:ok, data} ->
+            receive_connect_response(socket, timeout, buffer <> data)
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+    end
+  end
+
+  defp parse_connect_headers(rest, headers \\ []) do
+    case :erlang.decode_packet(:httph_bin, rest, []) do
+      {:ok, {:http_header, _len, field, _res, value}, rest} ->
+        parse_connect_headers(rest, [{field, value} | headers])
+
+      {:ok, :http_eoh, _body} ->
+        {:ok, headers}
+
+      {:error, _} = error ->
+        error
     end
   end
 

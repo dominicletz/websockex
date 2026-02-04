@@ -344,7 +344,7 @@ defmodule WebSockex.FrameTest do
 
       assert {:ok,
               <<1::1, 0::3, 9::4, 1::1, ^len::7, mask::bytes-size(4),
-                masked_payload::binary-size(len)>>} = Frame.encode_frame({:ping, payload})
+                masked_payload::binary-size(^len)>>} = Frame.encode_frame({:ping, payload})
 
       assert unmask(mask, masked_payload) == payload
     end
@@ -359,7 +359,7 @@ defmodule WebSockex.FrameTest do
 
       assert {:ok,
               <<1::1, 0::3, 10::4, 1::1, ^len::7, mask::bytes-size(4),
-                masked_payload::binary-size(len)>>} = Frame.encode_frame({:pong, payload})
+                masked_payload::binary-size(^len)>>} = Frame.encode_frame({:pong, payload})
 
       assert unmask(mask, masked_payload) == payload
     end
@@ -374,7 +374,7 @@ defmodule WebSockex.FrameTest do
 
       assert {:ok,
               <<1::1, 0::3, 8::4, 1::1, ^len::7, mask::bytes-size(4),
-                masked_payload::binary-size(len)>>} = Frame.encode_frame({:close, 1000, payload})
+                masked_payload::binary-size(^len)>>} = Frame.encode_frame({:close, 1000, payload})
 
       assert unmask(mask, masked_payload) == <<1000::16, payload::binary>>
     end
