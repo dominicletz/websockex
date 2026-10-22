@@ -198,6 +198,31 @@ defmodule WebSockex.ConnTest do
       assert {:error, _} = :ssl.sockname(socket)
     end
 
+    test "open_socket through a proxy verifies the target hostname", context do
+      proxy_port = start_tunnel_proxy()
+
+      conn =
+        WebSockex.Conn.new(context.uri,
+          cacerts: WebSockex.TestServer.cacerts(),
+          proxy: %{host: "127.0.0.1", port: proxy_port}
+        )
+
+      assert {:ok, %WebSockex.Conn{conn_mod: :ssl}} = WebSockex.Conn.open_socket(conn)
+
+      mismatched = %{context.uri | host: "127.0.0.1"}
+
+      bad_conn =
+        WebSockex.Conn.new(mismatched,
+          cacerts: WebSockex.TestServer.cacerts(),
+          proxy: "http://127.0.0.1:#{proxy_port}"
+        )
+
+      assert {:error, %WebSockex.ConnError{original: {:tls_alert, {_alert, detail}}}} =
+               WebSockex.Conn.open_socket(bad_conn)
+
+      assert to_string(detail) =~ "hostname_check_failed"
+    end
+
     test "open_socket with custom ssl options", context do
       ssl_options = [cacertfile: Path.join([__DIR__, "..", "support", "priv", "websockexca.cer"])]
       conn = WebSockex.Conn.new(context.uri, ssl_options: ssl_options)
@@ -320,6 +345,65 @@ defmodule WebSockex.ConnTest do
     assert MapSet.subset?(required_headers, headers)
   end
 
+  test "parses proxy credentials from a URL" do
+    conn = WebSockex.Conn.new("wss://example.com/ws", proxy: "http://user:p%40ss@proxy.test:8080")
+
+    assert conn.proxy == %{
+             host: "proxy.test",
+             port: 8080,
+             username: "user",
+             password: "p@ss"
+           }
+  end
+
+  test "ws connections are tunneled through the configured proxy" do
+    parent = self()
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, packet: 0, ip: {127, 0, 0, 1}])
+    {:ok, proxy_port} = :inet.port(listen)
+
+    spawn_link(fn ->
+      {:ok, socket} = :gen_tcp.accept(listen)
+      {:ok, request} = recv_headers(socket)
+      send(parent, {:proxy_request, request})
+      :gen_tcp.send(socket, "HTTP/1.1 200 Connection Established\r\n\r\n")
+    end)
+
+    conn =
+      WebSockex.Conn.new("ws://127.0.0.1:9/ws",
+        proxy: %{host: "127.0.0.1", port: proxy_port, username: "user", password: "secret"}
+      )
+
+    assert {:ok, %{socket: socket}} = WebSockex.Conn.open_socket(conn)
+    assert is_port(socket)
+
+    assert_receive {:proxy_request, request}
+    assert request =~ "CONNECT 127.0.0.1:9 HTTP/1.1"
+    assert request =~ "Proxy-Authorization: Basic #{Base.encode64("user:secret")}"
+  end
+
+  test "ws connections do not dial the target when a proxy is configured", context do
+    conn = WebSockex.Conn.new(context.uri, proxy: %{host: "127.0.0.1", port: 1})
+
+    assert {:error, %WebSockex.ConnError{original: :econnrefused}} =
+             WebSockex.Conn.open_socket(conn)
+  end
+
+  test "proxy connects honor socket_options" do
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, packet: 0, ip: {127, 0, 0, 1}])
+    {:ok, proxy_port} = :inet.port(listen)
+
+    conn =
+      WebSockex.Conn.new("ws://127.0.0.1:9/ws",
+        proxy: %{host: "127.0.0.1", port: proxy_port},
+        socket_options: [ip: {192, 0, 2, 1}]
+      )
+
+    assert {:error, %WebSockex.ConnError{original: :eaddrnotavail}} =
+             WebSockex.Conn.open_socket(conn)
+
+    :gen_tcp.close(listen)
+  end
+
   test "controlling_process", %{conn: conn} do
     socket = conn.socket
     # Start a random process
@@ -330,5 +414,78 @@ defmodule WebSockex.ConnTest do
     WebSockex.Conn.controlling_process(conn, agent_pid)
 
     assert :erlang.port_info(socket, :connected) == {:connected, agent_pid}
+  end
+
+  defp start_tunnel_proxy do
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, packet: 0, ip: {127, 0, 0, 1}])
+    {:ok, port} = :inet.port(listen)
+    spawn_link(fn -> accept_tunnel(listen) end)
+    port
+  end
+
+  defp accept_tunnel(listen) do
+    case :gen_tcp.accept(listen) do
+      {:ok, client} ->
+        spawn_link(fn -> accept_tunnel(listen) end)
+        tunnel_client(client)
+
+      {:error, :closed} ->
+        :ok
+    end
+  end
+
+  defp tunnel_client(client) do
+    {:ok, request} = recv_headers(client)
+    [host, port] = request |> tunnel_target() |> String.split(":")
+
+    {:ok, upstream} =
+      :gen_tcp.connect(String.to_charlist(host), String.to_integer(port), [
+        :binary,
+        active: false,
+        packet: 0
+      ])
+
+    :ok = :gen_tcp.send(client, "HTTP/1.1 200 Connection Established\r\n\r\n")
+    :inet.setopts(client, active: :once)
+    :inet.setopts(upstream, active: :once)
+    relay(client, upstream)
+  end
+
+  defp tunnel_target(request) do
+    ["CONNECT", target | _] = String.split(request, [" ", "\r\n"], trim: true)
+    target
+  end
+
+  defp recv_headers(socket, buffer \\ "") do
+    if String.contains?(buffer, "\r\n\r\n") do
+      {:ok, buffer}
+    else
+      case :gen_tcp.recv(socket, 0, 2_000) do
+        {:ok, data} -> recv_headers(socket, buffer <> data)
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  defp relay(client, upstream) do
+    receive do
+      {:tcp, ^client, data} ->
+        :gen_tcp.send(upstream, data)
+        :inet.setopts(client, active: :once)
+        relay(client, upstream)
+
+      {:tcp, ^upstream, data} ->
+        :gen_tcp.send(client, data)
+        :inet.setopts(upstream, active: :once)
+        relay(client, upstream)
+
+      {:tcp_closed, socket} ->
+        other = if socket == client, do: upstream, else: client
+        :gen_tcp.close(other)
+
+      {:tcp_error, _socket, _reason} ->
+        :gen_tcp.close(client)
+        :gen_tcp.close(upstream)
+    end
   end
 end
