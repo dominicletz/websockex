@@ -3,9 +3,10 @@ defmodule WebSockex.Conn do
   Handles establishing and controlling the TCP connection.
 
   Dispatches to the correct module for the underlying connection. (`:gen_tcp` or `:ssl`)
-
-  Is woefully inadequite for verifying proper peers in SSL connections.
   """
+
+  @compile {:no_warn_undefined, CAStore}
+  @compile {:no_warn_undefined, {:public_key, :cacerts_get, 0}}
 
   @socket_connect_timeout_default 6000
   @socket_recv_timeout_default 5000
@@ -21,7 +22,7 @@ defmodule WebSockex.Conn do
             socket_connect_timeout: @socket_connect_timeout_default,
             socket_recv_timeout: @socket_recv_timeout_default,
             cacerts: nil,
-            insecure: true,
+            insecure: false,
             resp_headers: [],
             ssl_options: nil,
             socket_options: nil
@@ -36,18 +37,20 @@ defmodule WebSockex.Conn do
   Options used when establishing a tcp or ssl connection.
 
   - `:extra_headers` - defines other headers to be send in the opening request.
-  - `:insecure` - Determines whether to verify the peer in a SSL connection.
-    SSL peer verification is currenctly broken and only works in certain cases
-    in which the `:cacerts` are also provided. Sorry. _Defaults to `true`_.
-  - `:cacerts` - The CA certifications for use in an secure connection when the
-    `:insecure` option is `false` (has no effect when `:insecure is true`).
-    These certifications need a list of decoded binaries. See the
+  - `:insecure` - Disables certificate and hostname verification in an SSL
+    connection when `true`. _Defaults to `false`_. By default, the OS trust
+    store is used on OTP 25+, falling back to `:castore` when available.
+  - `:cacerts` - The CA certificates for use in a secure connection, as a list
+    of DER-encoded binaries. Overrides the default trust store. Has no effect
+    when `:insecure` is `true` or `:ssl_options` is provided. See the
     [Erlang `:public_key` module][public_key] for more information.
   - `:socket_connect_timeout` - Timeout in ms for creating a TCP connection,
     default #{@socket_connect_timeout_default} ms.
   - `:socket_recv_timeout` - Timeout in ms for receiving a HTTP response header
     from socket, default #{@socket_recv_timeout_default} ms.
-  - `:ssl_options` - extra options for an SSL connection
+  - `:ssl_options` - Options for an SSL connection. When provided, these control
+    TLS verification and override `:insecure`, `:cacerts`, and the default
+    trust store.
   - `:socket_options` - extra options for the TCP part of the connection
 
   [public_key]: http://erlang.org/doc/apps/public_key/using_public_key.html
@@ -94,7 +97,7 @@ defmodule WebSockex.Conn do
       transport: transport(mod),
       extra_headers: Keyword.get(opts, :extra_headers, []),
       cacerts: Keyword.get(opts, :cacerts, nil),
-      insecure: Keyword.get(opts, :insecure, true),
+      insecure: Keyword.get(opts, :insecure, false),
       socket_connect_timeout:
         Keyword.get(opts, :socket_connect_timeout, @socket_connect_timeout_default),
       socket_recv_timeout: Keyword.get(opts, :socket_recv_timeout, @socket_recv_timeout_default),
@@ -189,15 +192,16 @@ defmodule WebSockex.Conn do
   end
 
   def open_socket(%{conn_mod: :ssl} = conn) do
-    case :ssl.connect(
-           parse_host(conn.host),
-           conn.port,
-           ssl_connection_options(conn),
-           conn.socket_connect_timeout
-         ) do
-      {:ok, socket} ->
-        {:ok, Map.put(conn, :socket, socket)}
-
+    with {:ok, options} <- ssl_connection_options(conn),
+         {:ok, socket} <-
+           :ssl.connect(
+             parse_host(conn.host),
+             conn.port,
+             options,
+             conn.socket_connect_timeout
+           ) do
+      {:ok, Map.put(conn, :socket, socket)}
+    else
       {:error, error} ->
         {:error, %WebSockex.ConnError{original: error}}
     end
@@ -366,33 +370,51 @@ defmodule WebSockex.Conn do
     minimal_socket_connection_options()
   end
 
-  # Crazy SSL Stuff (It will be normal SSL stuff when I figure out Erlang's ssl)
-
   defp ssl_connection_options(%{ssl_options: ssl_options}) when not is_nil(ssl_options) do
-    [
-      mode: :binary,
-      active: false,
-      packet: 0
-    ]
-    |> Keyword.merge(ssl_options)
+    {:ok, Keyword.merge(minimal_socket_connection_options(), ssl_options)}
   end
 
   defp ssl_connection_options(%{insecure: true}) do
-    [
-      :binary,
-      active: false,
-      packet: 0,
-      verify: :verify_none
-    ]
+    {:ok, minimal_socket_connection_options() ++ [verify: :verify_none]}
   end
 
   defp ssl_connection_options(%{cacerts: cacerts}) when cacerts != nil do
+    {:ok, minimal_socket_connection_options() ++ ssl_verification_options() ++ [cacerts: cacerts]}
+  end
+
+  defp ssl_connection_options(_conn) do
+    with {:ok, ca_options} <- default_ca_options() do
+      {:ok, minimal_socket_connection_options() ++ ssl_verification_options() ++ ca_options}
+    end
+  end
+
+  defp ssl_verification_options do
     [
-      :binary,
-      active: false,
-      packet: 0,
       verify: :verify_peer,
-      cacerts: cacerts
+      customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)]
     ]
+  end
+
+  defp default_ca_options do
+    if Code.ensure_loaded?(:public_key) and function_exported?(:public_key, :cacerts_get, 0) do
+      try do
+        {:ok, [cacerts: :public_key.cacerts_get()]}
+      rescue
+        _ -> castore_options()
+      end
+    else
+      castore_options()
+    end
+  end
+
+  defp castore_options do
+    if Code.ensure_loaded?(CAStore) do
+      {:ok, [cacertfile: CAStore.file_path()]}
+    else
+      {:error,
+       "No CA trust store is available; WebSockex verifies TLS peers by default. " <>
+         "Pass cacerts: or ssl_options:, add :castore to your dependencies, run OTP 25+, " <>
+         "or pass insecure: true to disable verification."}
+    end
   end
 end

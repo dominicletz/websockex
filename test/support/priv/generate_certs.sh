@@ -15,7 +15,8 @@ openssl req -new -key websockex.key -out websockex.csr \
 # Generate server certificate signed by our CA
 openssl x509 -req -days 3650 -in websockex.csr \
   -CA websockexca.cer -CAkey websockexca.key \
-  -CAcreateserial -out websockex.cer
+  -CAcreateserial -out websockex.cer \
+  -extfile <(printf "subjectAltName=DNS:localhost")
 
 # Clean up temporary files
 rm websockex.csr websockexca.key websockexca.srl

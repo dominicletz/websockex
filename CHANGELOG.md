@@ -1,5 +1,8 @@
 ## In-Tree
 ### Breaking Changes
+- TLS peer and hostname verification is on by default for `wss://` connections.
+  Pass `insecure: true` to restore the old behavior. On OTP older than 25 without
+  `:castore`, callers must pass `cacerts:` or `ssl_options:`. Fixes [#1](https://github.com/dominicletz/websockex/issues/1).
 - Requires Elixir version 1.7+ due to changes in Stacktrace
 
 ## 0.4.3

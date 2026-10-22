@@ -248,7 +248,8 @@ defmodule WebSockexTest do
     TestServer.receive_socket_pid()
     |> TestServer.new_conn_mode(:immediate_reply)
 
-    assert {:ok, _pid} = TestClient.start_link(url, %{catch_text: self()})
+    assert {:ok, _pid} =
+             TestClient.start_link(url, %{catch_text: self()}, cacerts: TestServer.cacerts())
 
     assert_receive {:caught_text, "Immediate Reply"}
   end
@@ -918,7 +919,7 @@ defmodule WebSockexTest do
       {:ok, {server_ref, url}} = TestServer.start_https(self())
       on_exit(fn -> TestServer.shutdown(server_ref) end)
 
-      {:ok, pid} = TestClient.start_link(url, %{})
+      {:ok, pid} = TestClient.start_link(url, %{}, cacerts: TestServer.cacerts())
       Process.unlink(pid)
       Process.monitor(pid)
       TestClient.catch_attr(pid, :disconnect, self())
