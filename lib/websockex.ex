@@ -688,6 +688,10 @@ defmodule WebSockex do
         :gen.reply(from, {:error, %WebSockex.NotConnectedError{connection_state: :opening}})
         open_loop(parent, debug, state)
 
+      {:"$websockex_close_output", from, _frame} ->
+        :gen.reply(from, {:error, %WebSockex.NotConnectedError{connection_state: :opening}})
+        open_loop(parent, debug, state)
+
       {:EXIT, ^parent, reason} ->
         case state do
           %{reply_fun: reply_fun} ->
@@ -754,7 +758,7 @@ defmodule WebSockex do
           {:"$websockex_close_output", from, close_frame} ->
             if output_closed? do
               # Already closed output
-              :gen.reply(from, {:ok, :ok})
+              :gen.reply(from, :ok)
               websocket_loop(parent, debug, state)
             else
               handle_close_output(close_frame, from, parent, debug, state)
@@ -810,7 +814,7 @@ defmodule WebSockex do
     case send_close_frame(close_reason, state.conn) do
       :ok ->
         debug = Utils.sys_debug(debug, {:socket_out, :close, close_reason}, state)
-        :gen.reply(from, {:ok, :ok})
+        :gen.reply(from, :ok)
         # Mark output as closed and continue in websocket_loop
         websocket_loop(parent, debug, %{state | output_closed_reason: close_reason})
 
@@ -882,8 +886,23 @@ defmodule WebSockex do
     common_handle({:handle_pong, {:pong, msg}}, parent, debug, state)
   end
 
+  defp handle_frame(:close, parent, debug, %{output_closed_reason: reason} = state)
+       when not is_nil(reason) do
+    complete_half_close(reason, parent, debug, state)
+  end
+
   defp handle_frame(:close, parent, debug, state) do
     handle_close({:remote, :normal}, parent, debug, state)
+  end
+
+  defp handle_frame(
+         {:close, _code, _reason},
+         parent,
+         debug,
+         %{output_closed_reason: reason} = state
+       )
+       when not is_nil(reason) do
+    complete_half_close(reason, parent, debug, state)
   end
 
   defp handle_frame({:close, code, reason}, parent, debug, state) do
@@ -973,8 +992,9 @@ defmodule WebSockex do
         websocket_loop(parent, debug, %{state | module_state: new_state})
 
       {:reply, frame, new_state} ->
-        if output_closed? do
-          # Can't send frames when output is closed, just continue
+        # RFC 6455 forbids data frames after a local Close, but a Pong is still
+        # required until a Close has been received.
+        if output_closed? and not pong_frame?(frame) do
           debug = Utils.sys_debug(debug, {:reply_ignored, function}, state)
           websocket_loop(parent, debug, %{state | module_state: new_state})
         else
@@ -1015,6 +1035,18 @@ defmodule WebSockex do
 
         terminate(error, parent, debug, state)
     end
+  end
+
+  defp pong_frame?(:pong), do: true
+  defp pong_frame?({:pong, _}), do: true
+  defp pong_frame?(_frame), do: false
+
+  # The peer's Close completes a half-close. Report the local reason that was
+  # sent instead of treating the handshake completion as a remote disconnect.
+  defp complete_half_close(reason, parent, debug, state) do
+    debug = Utils.sys_debug(debug, {:close, :local, reason}, state)
+    timer_ref = Process.send_after(self(), :"$websockex_close_timeout", 5000)
+    close_loop(reason, parent, debug, Map.put(state, :timer_ref, timer_ref))
   end
 
   defp handle_remote_close(reason, parent, debug, state) do
@@ -1167,7 +1199,14 @@ defmodule WebSockex do
 
     case result do
       {:ok, new_module_state} ->
-        state = Map.merge(state, %{buffer: <<>>, fragment: nil, module_state: new_module_state})
+        state =
+          Map.merge(state, %{
+            buffer: <<>>,
+            fragment: nil,
+            module_state: new_module_state,
+            output_closed_reason: nil
+          })
+
         websocket_loop(parent, debug, state)
 
       {:"$EXIT", reason} ->
