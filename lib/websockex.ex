@@ -556,7 +556,7 @@ defmodule WebSockex do
   end
 
   def system_continue(parent, debug, %{connection_status: :output_closed} = state) do
-     websocket_loop(parent, debug, Map.delete(state, :connection_status))
+    websocket_loop(parent, debug, Map.delete(state, :connection_status))
   end
 
   @doc false
@@ -741,7 +741,11 @@ defmodule WebSockex do
 
           {:"$websockex_send", from, frame} ->
             if output_closed? do
-              :gen.reply(from, {:error, %WebSockex.NotConnectedError{connection_state: :output_closed}})
+              :gen.reply(
+                from,
+                {:error, %WebSockex.NotConnectedError{connection_state: :output_closed}}
+              )
+
               websocket_loop(parent, debug, state)
             else
               sync_send(frame, from, parent, debug, state)
