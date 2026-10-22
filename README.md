@@ -38,6 +38,15 @@ def deps do
 end
 ```
 
+## TLS verification
+
+`wss://` connections verify the server certificate and hostname by default, using
+the OS trust store on OTP 25+ or `:castore` when available. Add `:castore` to your
+dependencies if your OTP version has no OS trust store support.
+
+Pass `cacerts:` to supply custom CA certificates, or `ssl_options:` to control the
+TLS options directly. Pass `insecure: true` to disable verification.
+
 ## Why WebSockex?
 
 WebSockex was conceived after trying other libraries and realizing that I needed something tested, that actually

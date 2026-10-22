@@ -46,6 +46,7 @@ defmodule WebSockex.Mixfile do
 
   defp deps do
     [
+      {:castore, "~> 0.1 or ~> 1.0", optional: true},
       {:ex_doc, "~> 0.27", only: :dev, runtime: false},
       {:cowboy, "~> 2.9", only: :test},
       {:plug_cowboy, "~> 2.5", only: :test},

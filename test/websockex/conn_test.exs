@@ -143,16 +143,37 @@ defmodule WebSockex.ConnTest do
 
       uri = URI.parse(url)
 
-      {:ok, conn} = WebSockex.Conn.new(uri) |> WebSockex.Conn.open_socket()
+      conn = WebSockex.Conn.new(uri, cacerts: WebSockex.TestServer.cacerts())
 
       [url: url, uri: uri, conn: conn]
+    end
+
+    test "open_socket rejects an untrusted certificate by default", context do
+      conn = WebSockex.Conn.new(context.uri)
+
+      assert {:error, %WebSockex.ConnError{original: {:tls_alert, {:unknown_ca, _}}}} =
+               WebSockex.Conn.open_socket(conn)
+    end
+
+    test "open_socket with insecure false uses the default trust store path", context do
+      conn = WebSockex.Conn.new(context.uri, insecure: false)
+
+      assert {:error, %WebSockex.ConnError{original: {:tls_alert, _}}} =
+               WebSockex.Conn.open_socket(conn)
+    end
+
+    test "open_socket rejects a hostname mismatch with supplied cacerts", context do
+      uri = %{context.uri | host: "127.0.0.1"}
+      conn = WebSockex.Conn.new(uri, cacerts: WebSockex.TestServer.cacerts())
+
+      assert {:error, %WebSockex.ConnError{original: {:tls_alert, {:bad_certificate, _}}}} =
+               WebSockex.Conn.open_socket(conn)
     end
 
     test "open_socket with supplied cacerts", context do
       conn =
         WebSockex.Conn.new(
           context.uri,
-          insecure: false,
           cacerts: WebSockex.TestServer.cacerts()
         )
 
@@ -168,10 +189,11 @@ defmodule WebSockex.ConnTest do
     end
 
     test "close_socket", context do
-      socket = context.conn.socket
+      {:ok, conn} = WebSockex.Conn.open_socket(context.conn)
+      socket = conn.socket
 
       assert {:ok, _} = :ssl.sockname(socket)
-      assert WebSockex.Conn.close_socket(context.conn) == %{context.conn | socket: nil}
+      assert WebSockex.Conn.close_socket(conn) == %{conn | socket: nil}
       Process.sleep(50)
       assert {:error, _} = :ssl.sockname(socket)
     end
@@ -217,7 +239,7 @@ defmodule WebSockex.ConnTest do
       {:ok, {server_ref, url}} = WebSockex.TestServer.start_https(self())
       on_exit(fn -> WebSockex.TestServer.shutdown(server_ref) end)
       uri = URI.parse(url)
-      conn = WebSockex.Conn.new(uri)
+      conn = WebSockex.Conn.new(uri, cacerts: WebSockex.TestServer.cacerts())
       {:ok, conn} = WebSockex.Conn.open_socket(conn)
 
       assert :ssl.getopts(conn.socket, [:active]) == {:ok, active: false}
