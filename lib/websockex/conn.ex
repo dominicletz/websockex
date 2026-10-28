@@ -13,6 +13,7 @@ defmodule WebSockex.Conn do
 
   defstruct conn_mod: nil,
             host: nil,
+            connect_host: nil,
             port: nil,
             path: nil,
             query: nil,
@@ -36,6 +37,10 @@ defmodule WebSockex.Conn do
   @typedoc """
   Options used when establishing a tcp or ssl connection.
 
+  - `:connect_host` - The hostname or IP address to open the socket to instead
+    of the URL host. The `Host` header, the TLS server name indication, and the
+    TLS hostname verification still use the URL host. _Defaults to `nil`_,
+    which opens the socket to the URL host.
   - `:extra_headers` - defines other headers to be send in the opening request.
   - `:insecure` - Disables certificate and hostname verification in an SSL
     connection when `true`. _Defaults to `false`_. By default, the OS trust
@@ -56,7 +61,8 @@ defmodule WebSockex.Conn do
   [public_key]: http://erlang.org/doc/apps/public_key/using_public_key.html
   """
   @type connection_option ::
-          {:extra_headers, [header]}
+          {:connect_host, String.t()}
+          | {:extra_headers, [header]}
           | {:cacerts, [certification]}
           | {:insecure, boolean}
           | {:socket_connect_timeout, non_neg_integer}
@@ -67,6 +73,7 @@ defmodule WebSockex.Conn do
   @type t :: %__MODULE__{
           conn_mod: :gen_tcp | :ssl,
           host: String.t(),
+          connect_host: String.t() | nil,
           port: non_neg_integer,
           path: String.t(),
           query: String.t() | nil,
@@ -90,6 +97,7 @@ defmodule WebSockex.Conn do
 
     %WebSockex.Conn{
       host: uri.host,
+      connect_host: Keyword.get(opts, :connect_host),
       port: uri.port,
       path: uri.path,
       query: uri.query,
@@ -178,7 +186,7 @@ defmodule WebSockex.Conn do
 
   def open_socket(%{conn_mod: :gen_tcp} = conn) do
     case :gen_tcp.connect(
-           parse_host(conn.host),
+           parse_host(conn.connect_host || conn.host),
            conn.port,
            socket_connection_options(conn),
            conn.socket_connect_timeout
@@ -195,7 +203,7 @@ defmodule WebSockex.Conn do
     with {:ok, options} <- ssl_connection_options(conn),
          {:ok, socket} <-
            :ssl.connect(
-             parse_host(conn.host),
+             parse_host(conn.connect_host || conn.host),
              conn.port,
              options,
              conn.socket_connect_timeout
@@ -370,22 +378,28 @@ defmodule WebSockex.Conn do
     minimal_socket_connection_options()
   end
 
-  defp ssl_connection_options(%{ssl_options: ssl_options}) when not is_nil(ssl_options) do
-    {:ok, Keyword.merge(minimal_socket_connection_options(), ssl_options)}
+  defp ssl_connection_options(%{ssl_options: ssl_options} = conn) when not is_nil(ssl_options) do
+    {:ok, Keyword.merge(ssl_base_options(conn), ssl_options)}
   end
 
-  defp ssl_connection_options(%{insecure: true}) do
-    {:ok, minimal_socket_connection_options() ++ [verify: :verify_none]}
+  defp ssl_connection_options(%{insecure: true} = conn) do
+    {:ok, ssl_base_options(conn) ++ [verify: :verify_none]}
   end
 
-  defp ssl_connection_options(%{cacerts: cacerts}) when cacerts != nil do
-    {:ok, minimal_socket_connection_options() ++ ssl_verification_options() ++ [cacerts: cacerts]}
+  defp ssl_connection_options(%{cacerts: cacerts} = conn) when cacerts != nil do
+    {:ok, ssl_base_options(conn) ++ ssl_verification_options() ++ [cacerts: cacerts]}
   end
 
-  defp ssl_connection_options(_conn) do
+  defp ssl_connection_options(conn) do
     with {:ok, ca_options} <- default_ca_options() do
-      {:ok, minimal_socket_connection_options() ++ ssl_verification_options() ++ ca_options}
+      {:ok, ssl_base_options(conn) ++ ssl_verification_options() ++ ca_options}
     end
+  end
+
+  defp ssl_base_options(%{connect_host: nil}), do: minimal_socket_connection_options()
+
+  defp ssl_base_options(%{host: host}) do
+    minimal_socket_connection_options() ++ [server_name_indication: to_charlist(host)]
   end
 
   defp ssl_verification_options do
