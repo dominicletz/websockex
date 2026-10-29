@@ -4,7 +4,7 @@ defmodule WebSockex.Conn do
 
   Dispatches to the correct module for the underlying connection. (`:gen_tcp` or `:ssl`)
 
-  Supports HTTP CONNECT proxy tunneling for secure WebSocket connections.
+  Supports HTTP CONNECT proxy tunneling for WebSocket connections.
   """
 
   @compile {:no_warn_undefined, CAStore}
@@ -135,12 +135,13 @@ defmodule WebSockex.Conn do
 
   defp parse_proxy_option(proxy_url) when is_binary(proxy_url) do
     case URI.parse(proxy_url) do
-      %URI{host: host, port: port} when not is_nil(host) and not is_nil(port) ->
-        %{host: host, port: port, username: nil, password: nil}
+      %URI{host: host, port: port, userinfo: userinfo}
+      when not is_nil(host) and not is_nil(port) ->
+        proxy_map(host, port, userinfo)
 
-      %URI{host: host, scheme: scheme} when not is_nil(host) ->
+      %URI{host: host, scheme: scheme, userinfo: userinfo} when not is_nil(host) ->
         port = if scheme == "https", do: 443, else: 80
-        %{host: host, port: port, username: nil, password: nil}
+        proxy_map(host, port, userinfo)
 
       _ ->
         nil
@@ -148,6 +149,24 @@ defmodule WebSockex.Conn do
   end
 
   defp parse_proxy_option(_), do: nil
+
+  defp proxy_map(host, port, userinfo) do
+    {username, password} = split_userinfo(userinfo)
+    %{host: host, port: port, username: username, password: password}
+  end
+
+  defp split_userinfo(nil), do: {nil, nil}
+  defp split_userinfo(""), do: {nil, nil}
+
+  defp split_userinfo(userinfo) do
+    case String.split(userinfo, ":", parts: 2) do
+      [username, password] -> {decode_userinfo(username), decode_userinfo(password)}
+      [username] -> {decode_userinfo(username), nil}
+    end
+  end
+
+  defp decode_userinfo(""), do: nil
+  defp decode_userinfo(value), do: URI.decode(value)
 
   @doc """
   Parses a url string for a valid URI
@@ -215,70 +234,26 @@ defmodule WebSockex.Conn do
   @spec open_socket(__MODULE__.t()) :: {:ok, __MODULE__.t()} | {:error, term}
   def open_socket(conn)
 
-  # Proxy path for SSL connections - tunnel through HTTP CONNECT
-  def open_socket(%{conn_mod: :ssl, proxy: %{host: proxy_host, port: proxy_port}} = conn) do
-    # Step 1: Connect to proxy via plain TCP
-    tcp_opts = [
-      mode: :binary,
-      active: false,
-      packet: 0
-    ]
-
+  # Tunnel any TCP target through an HTTP CONNECT proxy, then upgrade to TLS
+  # when the WebSocket itself is secure.
+  def open_socket(%{proxy: %{host: proxy_host, port: proxy_port}} = conn) do
     with {:ok, tcp_socket} <-
            :gen_tcp.connect(
              parse_host(proxy_host),
              proxy_port,
-             tcp_opts,
+             socket_connection_options(conn),
              conn.socket_connect_timeout
            ),
-         # Step 2: Send HTTP CONNECT request
          :ok <- send_connect_request(tcp_socket, conn),
-         # Step 3: Wait for 200 response
          {:ok, _headers} <- receive_connect_response(tcp_socket, conn.socket_recv_timeout),
-         # Step 4: Upgrade TCP socket to SSL
-         {:ok, options} <- ssl_connection_options(conn),
-         {:ok, ssl_socket} <-
-           :ssl.connect(tcp_socket, options, conn.socket_connect_timeout) do
-      {:ok, Map.put(conn, :socket, ssl_socket)}
+         {:ok, socket} <- tunnel_socket(tcp_socket, conn) do
+      {:ok, Map.put(conn, :socket, socket)}
     else
       {:error, error} -> {:error, %WebSockex.ConnError{original: error}}
     end
   end
 
   # Non-proxy TCP connection
-  def open_socket(%{conn_mod: :gen_tcp, proxy: nil} = conn) do
-    case :gen_tcp.connect(
-           parse_host(conn.host),
-           conn.port,
-           socket_connection_options(conn),
-           conn.socket_connect_timeout
-         ) do
-      {:ok, socket} ->
-        {:ok, Map.put(conn, :socket, socket)}
-
-      {:error, error} ->
-        {:error, %WebSockex.ConnError{original: error}}
-    end
-  end
-
-  # Non-proxy SSL connection
-  def open_socket(%{conn_mod: :ssl, proxy: nil} = conn) do
-    with {:ok, options} <- ssl_connection_options(conn),
-         {:ok, socket} <-
-           :ssl.connect(
-             parse_host(conn.host),
-             conn.port,
-             options,
-             conn.socket_connect_timeout
-           ) do
-      {:ok, Map.put(conn, :socket, socket)}
-    else
-      {:error, error} ->
-        {:error, %WebSockex.ConnError{original: error}}
-    end
-  end
-
-  # Fallback for gen_tcp with proxy (non-SSL target - rare case)
   def open_socket(%{conn_mod: :gen_tcp} = conn) do
     case :gen_tcp.connect(
            parse_host(conn.host),
@@ -294,6 +269,41 @@ defmodule WebSockex.Conn do
     end
   end
 
+  # Non-proxy SSL connection
+  def open_socket(%{conn_mod: :ssl} = conn) do
+    with {:ok, options} <- ssl_connection_options(conn),
+         {:ok, socket} <-
+           :ssl.connect(
+             parse_host(conn.host),
+             conn.port,
+             options,
+             conn.socket_connect_timeout
+           ) do
+      {:ok, Map.put(conn, :socket, socket)}
+    else
+      {:error, error} ->
+        {:error, %WebSockex.ConnError{original: error}}
+    end
+  end
+
+  defp tunnel_socket(tcp_socket, %{conn_mod: :ssl} = conn) do
+    with {:ok, options} <- ssl_connection_options(conn) do
+      :ssl.connect(
+        tcp_socket,
+        ensure_server_name_indication(options, conn.host),
+        conn.socket_connect_timeout
+      )
+    end
+  end
+
+  defp tunnel_socket(tcp_socket, %{conn_mod: :gen_tcp}), do: {:ok, tcp_socket}
+
+  # A socket upgrade has no Host argument, so OTP will not set SNI or check the
+  # certificate against the destination unless we pass it explicitly.
+  defp ensure_server_name_indication(options, host) do
+    Keyword.put_new(options, :server_name_indication, String.to_charlist(host))
+  end
+
   # Send HTTP CONNECT request to proxy
   defp send_connect_request(socket, conn) do
     host_port = "#{conn.host}:#{conn.port}"
@@ -302,11 +312,23 @@ defmodule WebSockex.Conn do
       "CONNECT #{host_port} HTTP/1.1\r\n",
       "Host: #{host_port}\r\n",
       "Proxy-Connection: Keep-Alive\r\n",
+      proxy_authorization_header(conn.proxy),
       "\r\n"
     ]
 
     :gen_tcp.send(socket, request)
   end
+
+  defp proxy_authorization_header(%{username: username} = proxy)
+       when is_binary(username) and username != "" do
+    credentials = Base.encode64(username <> ":" <> proxy_password(proxy))
+    "Proxy-Authorization: Basic #{credentials}\r\n"
+  end
+
+  defp proxy_authorization_header(_proxy), do: ""
+
+  defp proxy_password(%{password: password}) when is_binary(password), do: password
+  defp proxy_password(_proxy), do: ""
 
   # Receive and validate HTTP CONNECT response
   defp receive_connect_response(socket, timeout) do
