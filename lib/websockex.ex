@@ -392,13 +392,12 @@ defmodule WebSockex do
   end
 
   def start(url, module, state, opts) do
-    case WebSockex.Conn.parse_url(url) do
-      {:ok, uri} ->
-        conn = WebSockex.Conn.new(uri, opts)
+    case WebSockex.Conn.new(url, opts) do
+      %WebSockex.Conn{} = conn ->
         start(conn, module, state, opts)
 
-      {:error, error} ->
-        {:error, error}
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -422,13 +421,12 @@ defmodule WebSockex do
   end
 
   def start_link(url, module, state, opts) do
-    case WebSockex.Conn.parse_url(url) do
-      {:ok, uri} ->
-        conn = WebSockex.Conn.new(uri, opts)
+    case WebSockex.Conn.new(url, opts) do
+      %WebSockex.Conn{} = conn ->
         start_link(conn, module, state, opts)
 
-      {:error, error} ->
-        {:error, error}
+      {:error, _} = error ->
+        error
     end
   end
 
