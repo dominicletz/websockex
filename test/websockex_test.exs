@@ -139,6 +139,11 @@ defmodule WebSockexTest do
       assert TestClient.start_link("lemon_pie", :ok) ==
                {:error, %WebSockex.URLError{url: "lemon_pie"}}
     end
+
+    test "returns an error with an invalid proxy" do
+      assert TestClient.start("ws://127.0.0.1:9/ws", :ok, proxy: "proxy.corp.com:8080") ==
+               {:error, %WebSockex.ConnError{original: {:invalid_proxy, "proxy.corp.com:8080"}}}
+    end
   end
 
   describe "start_link" do
@@ -181,6 +186,11 @@ defmodule WebSockexTest do
     test "returns an error with a bad url" do
       assert TestClient.start_link("lemon_pie", :ok) ==
                {:error, %WebSockex.URLError{url: "lemon_pie"}}
+    end
+
+    test "returns an error with an invalid proxy" do
+      assert TestClient.start_link("ws://127.0.0.1:9/ws", :ok, proxy: "proxy.corp.com:8080") ==
+               {:error, %WebSockex.ConnError{original: {:invalid_proxy, "proxy.corp.com:8080"}}}
     end
   end
 
