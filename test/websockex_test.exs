@@ -1490,7 +1490,10 @@ defmodule WebSockexTest do
       connected_server_pid = TestServer.receive_socket_pid()
       send(connected_server_pid, {:send, {:text, "Hello"}})
       assert_receive {:caught_text, "Hello"}
-      assert :ok = WebSockex.send_frame(pid, :ping)
+
+      payload = :erlang.term_to_binary(:still_open)
+      assert :ok = WebSockex.send_frame(pid, {:binary, payload})
+      assert_receive :still_open
     end
 
     test "still replies to ping after close_output", context do
