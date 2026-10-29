@@ -1430,17 +1430,22 @@ defmodule WebSockexTest do
 
   describe "close_output" do
     test "returns error when trying to send after close_output", context do
+      # Keep the peer from completing the close handshake before the send.
+      send(context.server_pid, :stall)
+      Process.sleep(50)
+
       assert :ok = WebSockex.close_output(context.pid)
 
-      # Sending should fail after close_output
       assert {:error, %WebSockex.NotConnectedError{connection_state: :output_closed}} =
                WebSockex.send_frame(context.pid, {:text, "Should fail"})
     end
 
     test "works with custom close code and message", context do
+      send(context.server_pid, :stall)
+      Process.sleep(50)
+
       assert :ok = WebSockex.close_output(context.pid, {1000, "Done sending"})
 
-      # Sending should fail
       assert {:error, %WebSockex.NotConnectedError{connection_state: :output_closed}} =
                WebSockex.send_frame(context.pid, {:text, "Should fail"})
     end
