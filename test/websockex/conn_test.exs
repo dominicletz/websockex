@@ -320,6 +320,87 @@ defmodule WebSockex.ConnTest do
     assert MapSet.subset?(required_headers, headers)
   end
 
+  describe "connect_host" do
+    test "opens the socket to connect_host and keeps the URL host in the Host header" do
+      {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+      {:ok, port} = :inet.port(listen)
+      parent = self()
+
+      server =
+        Task.async(fn ->
+          {:ok, socket} = :gen_tcp.accept(listen)
+          :ok = :gen_tcp.controlling_process(socket, parent)
+          socket
+        end)
+
+      conn = WebSockex.Conn.new("ws://websockex.invalid:#{port}/ws", connect_host: "127.0.0.1")
+
+      assert {:ok, conn} = WebSockex.Conn.open_socket(conn)
+      socket = Task.await(server)
+
+      {:ok, request} = WebSockex.Conn.build_request(conn, "pants")
+      :ok = WebSockex.Conn.socket_send(conn, request)
+      assert {:ok, received} = :gen_tcp.recv(socket, 0, 1_000)
+      assert received =~ "\r\nHost: websockex.invalid:#{port}\r\n"
+    end
+  end
+
+  describe "connect_host over TLS" do
+    setup do
+      {:ok, listen} =
+        :ssl.listen(0, [
+          :binary,
+          active: false,
+          ip: {127, 0, 0, 1},
+          certfile: Path.join([__DIR__, "..", "support", "priv", "websockex.cer"]),
+          keyfile: Path.join([__DIR__, "..", "support", "priv", "websockex.key"])
+        ])
+
+      {:ok, {_address, port}} = :ssl.sockname(listen)
+      parent = self()
+
+      server =
+        Task.async(fn ->
+          {:ok, socket} = :ssl.transport_accept(listen)
+          {:ok, socket} = :ssl.handshake(socket)
+          :ok = :ssl.controlling_process(socket, parent)
+          socket
+        end)
+
+      [port: port, server: server]
+    end
+
+    test "sends the URL host as the TLS server name indication", %{port: port, server: server} do
+      conn =
+        WebSockex.Conn.new("wss://websockex.invalid:#{port}/ws",
+          connect_host: "127.0.0.1",
+          insecure: true
+        )
+
+      assert {:ok, conn} = WebSockex.Conn.open_socket(conn)
+      socket = Task.await(server)
+
+      assert :ssl.connection_information(socket, [:sni_hostname]) ==
+               {:ok, [sni_hostname: ~c"websockex.invalid"]}
+
+      {:ok, request} = WebSockex.Conn.build_request(conn, "pants")
+      :ok = WebSockex.Conn.socket_send(conn, request)
+      assert {:ok, received} = :ssl.recv(socket, 0, 1_000)
+      assert received =~ "\r\nHost: websockex.invalid:#{port}\r\n"
+    end
+
+    test "verifies the TLS certificate against the URL host", %{port: port, server: server} do
+      conn =
+        WebSockex.Conn.new("wss://localhost:#{port}/ws",
+          connect_host: "127.0.0.1",
+          cacerts: WebSockex.TestServer.cacerts()
+        )
+
+      assert {:ok, _conn} = WebSockex.Conn.open_socket(conn)
+      Task.await(server)
+    end
+  end
+
   test "controlling_process", %{conn: conn} do
     socket = conn.socket
     # Start a random process
