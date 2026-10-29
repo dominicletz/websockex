@@ -17,6 +17,21 @@ defmodule WebSockexTest do
     use WebSockex
   end
 
+  defmodule ReasonClient do
+    use WebSockex
+
+    def start_link(url, state, opts \\ []) do
+      WebSockex.start_link(url, __MODULE__, state, opts)
+    end
+
+    def handle_disconnect(%{reason: reason}, %{report_to: pid} = state) do
+      send(pid, {:disconnect_reason, reason})
+      {:ok, state}
+    end
+
+    def handle_disconnect(_, state), do: {:ok, state}
+  end
+
   setup do
     {:ok, {server_ref, url}} = TestServer.start(self())
 
@@ -1410,6 +1425,107 @@ defmodule WebSockexTest do
 
       assert ChildSpecTest.child_spec(1, 2) == "llama"
       assert ChildSpecTest.child_spec(1) == "hippo"
+    end
+  end
+
+  describe "close_output" do
+    test "returns error when trying to send after close_output", context do
+      # Keep the peer from completing the close handshake before the send.
+      send(context.server_pid, :stall)
+      Process.sleep(50)
+
+      assert :ok = WebSockex.close_output(context.pid)
+
+      assert {:error, %WebSockex.NotConnectedError{connection_state: :output_closed}} =
+               WebSockex.send_frame(context.pid, {:text, "Should fail"})
+    end
+
+    test "works with custom close code and message", context do
+      send(context.server_pid, :stall)
+      Process.sleep(50)
+
+      assert :ok = WebSockex.close_output(context.pid, {1000, "Done sending"})
+
+      assert {:error, %WebSockex.NotConnectedError{connection_state: :output_closed}} =
+               WebSockex.send_frame(context.pid, {:text, "Should fail"})
+    end
+
+    test "completes close handshake when server closes", context do
+      assert :ok = WebSockex.close_output(context.pid)
+
+      # Server will have responded to our close frame, completing the handshake
+      assert_receive :normal_remote_closed, 500
+    end
+
+    test "reports the local close reason when the peer completes the handshake" do
+      {:ok, {server_ref, url}} = TestServer.start(self())
+      on_exit(fn -> TestServer.shutdown(server_ref) end)
+
+      {:ok, pid} = ReasonClient.start_link(url, %{report_to: self()})
+      _server_pid = TestServer.receive_socket_pid()
+
+      assert :ok = WebSockex.close_output(pid, {1000, "Done sending"})
+      assert_receive {:disconnect_reason, {:local, 1000, "Done sending"}}, 1_000
+    end
+
+    test "can send again after reconnecting from a half-close", context do
+      TestClient.set_attr(context.pid, :reconnect, true)
+      TestClient.catch_attr(context.pid, :text, self())
+
+      assert :ok = WebSockex.close_output(context.pid)
+
+      server_pid = TestServer.receive_socket_pid()
+      send(server_pid, {:send, {:text, "Hello"}})
+      assert_receive {:caught_text, "Hello"}
+
+      assert :ok = WebSockex.send_frame(context.pid, {:text, "after reconnect"})
+    end
+
+    test "rejects close_output while the socket is opening", context do
+      TestServer.new_conn_mode(context.server_pid, :connection_wait)
+
+      {:ok, pid} = TestClient.start_link(context.url, %{catch_text: self()}, async: true)
+
+      assert {:error, %WebSockex.NotConnectedError{connection_state: :opening}} =
+               WebSockex.close_output(pid)
+
+      server_pid = TestServer.receive_socket_pid()
+      send(server_pid, :connection_continue)
+
+      connected_server_pid = TestServer.receive_socket_pid()
+      send(connected_server_pid, {:send, {:text, "Hello"}})
+      assert_receive {:caught_text, "Hello"}
+
+      payload = :erlang.term_to_binary(:still_open)
+      assert :ok = WebSockex.send_frame(pid, {:binary, payload})
+      assert_receive :still_open
+    end
+
+    test "still replies to ping after close_output", context do
+      conn = TestClient.get_conn(context.pid)
+      send(context.server_pid, :stall)
+      Process.sleep(50)
+
+      assert :ok = WebSockex.close_output(context.pid)
+
+      :erlang.trace(context.pid, true, [:call])
+      :erlang.trace_pattern({:gen_tcp, :send, 2}, true, [:local])
+
+      on_exit(fn ->
+        try do
+          :erlang.trace(context.pid, false, [:call])
+        catch
+          _, _ -> :ok
+        end
+
+        :erlang.trace_pattern({:gen_tcp, :send, 2}, false, [:local])
+      end)
+
+      ping = <<1::1, 0::3, 9::4, 0::1, 0::7>>
+      send(context.pid, {conn.transport, conn.socket, ping})
+
+      assert_receive {:trace, _pid, :call, {:gen_tcp, :send, [_socket, frame]}}, 500
+      assert match?(<<1::1, 0::3, 10::4, 1::1, _rest::bits>>, frame)
     end
   end
 end
