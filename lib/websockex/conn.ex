@@ -28,6 +28,7 @@ defmodule WebSockex.Conn do
             resp_headers: [],
             ssl_options: nil,
             socket_options: nil,
+            inet_family: :inet,
             proxy: nil
 
   @type socket :: :gen_tcp.socket() | :ssl.sslsocket()
@@ -61,7 +62,14 @@ defmodule WebSockex.Conn do
   - `:ssl_options` - Options for an SSL connection. When provided, these control
     TLS verification and override `:insecure`, `:cacerts`, and the default
     trust store.
-  - `:socket_options` - extra options for the TCP part of the connection
+  - `:socket_options` - extra options for the TCP part of the connection.
+    This is merged as a keyword list, so it cannot carry the bare `:inet` or
+    `:inet6` atom. Set `:inet_family` instead.
+  - `:inet_family` - address family of the socket that is opened, `:inet` or
+    `:inet6`. _Defaults to `:inet`_ for a hostname. An IPv4 or IPv6 literal
+    selects its own family when this option is omitted. When `:proxy` is set,
+    the family is the one used to reach the proxy, not the WebSocket target.
+    A family that disagrees with a literal address is an error.
   - `:proxy` - HTTP CONNECT proxy configuration map with `:host`, `:port`,
     and optional `:username`/`:password` for basic auth, or a URL such as
     `"http://host:port"`. An invalid proxy is an error from `new/2` and is
@@ -77,6 +85,7 @@ defmodule WebSockex.Conn do
           | {:socket_recv_timeout, non_neg_integer}
           | {:ssl_options, [:ssl.tls_client_option()]}
           | {:socket_options, [:gen_tcp.option()]}
+          | {:inet_family, :inet | :inet6}
           | {:proxy, proxy_config() | String.t()}
 
   @type t :: %__MODULE__{
@@ -91,20 +100,22 @@ defmodule WebSockex.Conn do
           socket_connect_timeout: non_neg_integer,
           socket_recv_timeout: non_neg_integer,
           resp_headers: [header],
+          inet_family: :inet | :inet6,
           proxy: proxy_config() | nil
         }
 
   @doc """
   Returns a new `WebSockex.Conn` struct from a uri and options.
 
-  An invalid `:proxy` option returns `{:error, %WebSockex.ConnError{}}`.
+  An invalid `:proxy` or `:inet_family` returns `{:error, %WebSockex.ConnError{}}`.
   """
   @spec new(url :: String.t() | URI.t(), [connection_option]) ::
           __MODULE__.t() | {:error, %WebSockex.URLError{} | %WebSockex.ConnError{}}
   def new(url, opts \\ [])
 
   def new(%URI{} = uri, opts) do
-    with {:ok, proxy} <- parse_proxy_option(Keyword.get(opts, :proxy, nil)) do
+    with {:ok, proxy} <- parse_proxy_option(Keyword.get(opts, :proxy, nil)),
+         {:ok, inet_family} <- resolve_inet_family(dial_host(uri, proxy), opts) do
       mod = conn_module(uri.scheme)
 
       %WebSockex.Conn{
@@ -123,6 +134,7 @@ defmodule WebSockex.Conn do
           Keyword.get(opts, :socket_recv_timeout, @socket_recv_timeout_default),
         ssl_options: Keyword.get(opts, :ssl_options, nil),
         socket_options: Keyword.get(opts, :socket_options, nil),
+        inet_family: inet_family,
         proxy: proxy
       }
     end
@@ -133,6 +145,49 @@ defmodule WebSockex.Conn do
       {:ok, %URI{} = uri} -> new(uri, opts)
       {:error, _} = error -> error
     end
+  end
+
+  # The family belongs to the socket that is opened. A proxy dials the proxy
+  # host; the WebSocket target is only a name in the CONNECT request.
+  defp dial_host(_uri, %{host: host}) when is_binary(host), do: host
+  defp dial_host(%URI{host: host}, _proxy), do: host
+
+  defp resolve_inet_family(host, opts) do
+    case Keyword.fetch(opts, :inet_family) do
+      :error ->
+        {:ok, implied_inet_family(host)}
+
+      {:ok, family} when family in [:inet, :inet6] ->
+        case literal_family(host) do
+          nil -> {:ok, family}
+          ^family -> {:ok, family}
+          actual -> {:error, inet_family_mismatch(family, actual)}
+        end
+
+      {:ok, family} ->
+        {:error, %WebSockex.ConnError{original: {:invalid_inet_family, family}}}
+    end
+  end
+
+  defp implied_inet_family(host) do
+    case literal_family(host) do
+      nil -> :inet
+      family -> family
+    end
+  end
+
+  defp literal_family(host) when is_binary(host) do
+    case parse_host(host) do
+      {_, _, _, _} -> :inet
+      {_, _, _, _, _, _, _, _} -> :inet6
+      _ -> nil
+    end
+  end
+
+  defp literal_family(_host), do: nil
+
+  defp inet_family_mismatch(requested, actual) do
+    %WebSockex.ConnError{original: {:inet_family_mismatch, requested, actual}}
   end
 
   # Parse proxy option - can be a map or URL string like "http://host:port".
@@ -329,9 +384,21 @@ defmodule WebSockex.Conn do
 
   # A socket upgrade has no Host argument, so OTP will not set SNI or check the
   # certificate against the destination unless we pass it explicitly.
+  # IP literals are not legal SNI names (RFC 6066), so leave the option unset.
   defp ensure_server_name_indication(options, host) do
-    Keyword.put_new(options, :server_name_indication, String.to_charlist(host))
+    cond do
+      Keyword.has_key?(options, :server_name_indication) ->
+        options
+
+      ip_literal?(host) ->
+        options
+
+      true ->
+        Keyword.put(options, :server_name_indication, String.to_charlist(host))
+    end
   end
+
+  defp ip_literal?(host), do: literal_family(host) != nil
 
   # Send HTTP CONNECT request to proxy
   defp send_connect_request(socket, conn) do
@@ -439,12 +506,7 @@ defmodule WebSockex.Conn do
   """
   @spec build_request(__MODULE__.t(), key :: String.t()) :: {:ok, String.t()}
   def build_request(conn, key) do
-    host =
-      if conn.port in [80, 443] do
-        conn.host
-      else
-        "#{conn.host}:#{conn.port}"
-      end
+    host = handshake_host(conn.host, conn.port)
 
     headers =
       ([
@@ -530,6 +592,12 @@ defmodule WebSockex.Conn do
     end
   end
 
+  defp handshake_host(host, port) when port in [80, 443], do: bracket_ipv6_host(host)
+
+  defp handshake_host(host, port) do
+    "#{bracket_ipv6_host(host)}:#{port}"
+  end
+
   defp format_header({field, value}) do
     "#{field}: #{value}"
   end
@@ -562,39 +630,49 @@ defmodule WebSockex.Conn do
     end
   end
 
-  defp minimal_socket_connection_options() do
+  defp minimal_socket_connection_options(inet_family) do
     [
+      inet_family,
       mode: :binary,
       active: false,
       packet: 0
     ]
   end
 
-  defp socket_connection_options(%{socket_options: socket_options})
+  defp socket_connection_options(%{socket_options: socket_options} = conn)
        when not is_nil(socket_options) do
-    minimal_socket_connection_options()
-    |> Keyword.merge(socket_options)
+    merge_socket_options(conn.inet_family, socket_options)
   end
 
-  defp socket_connection_options(%{socket_options: _socket_options}) do
-    minimal_socket_connection_options()
+  defp socket_connection_options(conn) do
+    minimal_socket_connection_options(conn.inet_family)
   end
 
-  defp ssl_connection_options(%{ssl_options: ssl_options}) when not is_nil(ssl_options) do
-    {:ok, Keyword.merge(minimal_socket_connection_options(), ssl_options)}
+  # Keyword.merge/2 rejects a bare atom, so the family stays outside the merge.
+  defp merge_socket_options(inet_family, extra) do
+    [family | base] = minimal_socket_connection_options(inet_family)
+    [family | Keyword.merge(base, extra)]
   end
 
-  defp ssl_connection_options(%{insecure: true}) do
-    {:ok, minimal_socket_connection_options() ++ [verify: :verify_none]}
+  defp ssl_connection_options(%{ssl_options: ssl_options} = conn) when not is_nil(ssl_options) do
+    {:ok, merge_socket_options(conn.inet_family, ssl_options)}
   end
 
-  defp ssl_connection_options(%{cacerts: cacerts}) when cacerts != nil do
-    {:ok, minimal_socket_connection_options() ++ ssl_verification_options() ++ [cacerts: cacerts]}
+  defp ssl_connection_options(%{insecure: true} = conn) do
+    {:ok, minimal_socket_connection_options(conn.inet_family) ++ [verify: :verify_none]}
   end
 
-  defp ssl_connection_options(_conn) do
+  defp ssl_connection_options(%{cacerts: cacerts} = conn) when cacerts != nil do
+    {:ok,
+     minimal_socket_connection_options(conn.inet_family) ++
+       ssl_verification_options() ++ [cacerts: cacerts]}
+  end
+
+  defp ssl_connection_options(conn) do
     with {:ok, ca_options} <- default_ca_options() do
-      {:ok, minimal_socket_connection_options() ++ ssl_verification_options() ++ ca_options}
+      {:ok,
+       minimal_socket_connection_options(conn.inet_family) ++
+         ssl_verification_options() ++ ca_options}
     end
   end
 

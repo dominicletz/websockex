@@ -1,6 +1,22 @@
 defmodule WebSockex.ConnTest do
   use ExUnit.Case, async: true
 
+  # Evaluated when the test module is compiled. A missing IPv6 loopback skips
+  # the tests that have to bind ::1; it must not turn them into passing tests.
+  @ipv6_loopback (case :gen_tcp.listen(0, [
+                         :inet6,
+                         :binary,
+                         active: false,
+                         ip: {0, 0, 0, 0, 0, 0, 0, 1}
+                       ]) do
+                    {:ok, listen} ->
+                      :gen_tcp.close(listen)
+                      true
+
+                    {:error, reason} when reason in [:eafnosupport, :eaddrnotavail] ->
+                      false
+                  end)
+
   setup do
     {:ok, {server_ref, url}} = WebSockex.TestServer.start(self())
 
@@ -518,6 +534,145 @@ defmodule WebSockex.ConnTest do
     assert owned_port_count() == ports_before
   end
 
+  test "hostname defaults to inet and can opt into inet6" do
+    conn = WebSockex.Conn.new("ws://example.com/ws")
+    assert conn.inet_family == :inet
+
+    conn = WebSockex.Conn.new("ws://example.com/ws", inet_family: :inet6)
+    assert conn.inet_family == :inet6
+  end
+
+  test "address literals select their own family" do
+    assert WebSockex.Conn.new("ws://127.0.0.1/ws").inet_family == :inet
+    assert WebSockex.Conn.new("ws://[::1]:9/ws").inet_family == :inet6
+  end
+
+  test "inet_family follows the proxy host rather than the target" do
+    ipv4_proxy = WebSockex.Conn.new("ws://[::1]:9/ws", proxy: "http://127.0.0.1:8080")
+    assert ipv4_proxy.inet_family == :inet
+
+    ipv6_proxy = WebSockex.Conn.new("ws://127.0.0.1:9/ws", proxy: "http://[::1]:8080")
+    assert ipv6_proxy.inet_family == :inet6
+  end
+
+  test "invalid inet_family is an error" do
+    assert {:error, %WebSockex.ConnError{original: {:invalid_inet_family, :inet4}}} =
+             WebSockex.Conn.new("ws://example.com/ws", inet_family: :inet4)
+
+    assert {:error, %WebSockex.ConnError{original: {:invalid_inet_family, "inet6"}}} =
+             WebSockex.Conn.new("ws://example.com/ws", inet_family: "inet6")
+  end
+
+  test "inet_family that contradicts a literal address is an error" do
+    assert {:error, %WebSockex.ConnError{original: {:inet_family_mismatch, :inet, :inet6}}} =
+             WebSockex.Conn.new("ws://[::1]:9/ws", inet_family: :inet)
+
+    assert {:error, %WebSockex.ConnError{original: {:inet_family_mismatch, :inet6, :inet}}} =
+             WebSockex.Conn.new("ws://127.0.0.1:9/ws", inet_family: :inet6)
+
+    assert {:error, %WebSockex.ConnError{original: {:inet_family_mismatch, :inet6, :inet}}} =
+             WebSockex.Conn.new("ws://[::1]:9/ws",
+               proxy: "http://127.0.0.1:8080",
+               inet_family: :inet6
+             )
+  end
+
+  test "build_request brackets an IPv6 literal in the Host header" do
+    conn = %WebSockex.Conn{host: "::1", port: 8080, path: "/ws"}
+    {:ok, request} = WebSockex.Conn.build_request(conn, "pants")
+
+    assert request =~ "Host: [::1]:8080"
+    refute request =~ "Host: ::1:"
+
+    conn = %{conn | port: 80}
+    {:ok, request} = WebSockex.Conn.build_request(conn, "pants")
+    assert request =~ "Host: [::1]\r\n"
+    refute request =~ "Host: ::1\r\n"
+  end
+
+  test "default connection uses an IPv4 socket", %{conn: conn} do
+    assert conn.inet_family == :inet
+    assert {:ok, {{_, _, _, _}, _port}} = :inet.peername(conn.socket)
+  end
+
+  @tag skip: if(@ipv6_loopback, do: false, else: "IPv6 loopback is not available")
+  test "inet6 connects to an IPv6 listener" do
+    {:ok, listen} = listen_ipv6()
+    on_exit(fn -> :gen_tcp.close(listen) end)
+    {:ok, port} = :inet.port(listen)
+    spawn_link(fn -> accept_once(listen) end)
+
+    conn = WebSockex.Conn.new("ws://[::1]:#{port}/ws")
+    assert conn.inet_family == :inet6
+
+    assert {:ok, conn} = WebSockex.Conn.open_socket(conn)
+    assert {:ok, {{0, 0, 0, 0, 0, 0, 0, 1}, ^port}} = :inet.peername(conn.socket)
+    WebSockex.Conn.close_socket(conn)
+  end
+
+  @tag skip: if(@ipv6_loopback, do: false, else: "IPv6 loopback is not available")
+  test "wss passes inet6 through to the ssl socket" do
+    {:ok, listen} = listen_ipv6()
+    on_exit(fn -> :gen_tcp.close(listen) end)
+    {:ok, port} = :inet.port(listen)
+    spawn_link(fn -> accept_once(listen) end)
+
+    conn =
+      WebSockex.Conn.new("wss://[::1]:#{port}/ws",
+        insecure: true,
+        socket_connect_timeout: 500
+      )
+
+    assert conn.inet_family == :inet6
+
+    # The listener speaks plain TCP, so the handshake fails after the family
+    # has already been accepted. :eafnosupport would mean inet6 was not passed.
+    assert {:error, %WebSockex.ConnError{original: original}} = WebSockex.Conn.open_socket(conn)
+    refute original == :eafnosupport
+  end
+
+  @tag skip: if(@ipv6_loopback, do: false, else: "IPv6 loopback is not available")
+  test "proxy dial uses inet6 when the proxy is an IPv6 literal" do
+    parent = self()
+    {:ok, listen} = listen_ipv6()
+    on_exit(fn -> :gen_tcp.close(listen) end)
+    {:ok, proxy_port} = :inet.port(listen)
+
+    spawn_link(fn ->
+      case :gen_tcp.accept(listen) do
+        {:ok, socket} ->
+          {:ok, request} = recv_headers(socket)
+          send(parent, {:proxy_request, request})
+          :gen_tcp.send(socket, "HTTP/1.1 200 Connection Established\r\n\r\n")
+
+        {:error, _} ->
+          :ok
+      end
+    end)
+
+    conn =
+      WebSockex.Conn.new("ws://127.0.0.1:9/ws", proxy: "http://[::1]:#{proxy_port}")
+
+    assert conn.inet_family == :inet6
+    assert {:ok, %{socket: socket}} = WebSockex.Conn.open_socket(conn)
+    assert {:ok, {{0, 0, 0, 0, 0, 0, 0, 1}, ^proxy_port}} = :inet.peername(socket)
+
+    assert_receive {:proxy_request, request}
+    assert request =~ "CONNECT 127.0.0.1:9 HTTP/1.1"
+
+    WebSockex.Conn.close_socket(conn)
+  end
+
+  test "wss through a proxy does not send an IPv6 literal as SNI" do
+    assert {:ok, hello} = client_hello_via_proxy("wss://[::1]:443/ws")
+    refute hello =~ "::1"
+  end
+
+  test "wss through a proxy sends a hostname as SNI" do
+    assert {:ok, hello} = client_hello_via_proxy("wss://example.com/ws")
+    assert hello =~ "example.com"
+  end
+
   test "controlling_process", %{conn: conn} do
     socket = conn.socket
     # Start a random process
@@ -528,6 +683,66 @@ defmodule WebSockex.ConnTest do
     WebSockex.Conn.controlling_process(conn, agent_pid)
 
     assert :erlang.port_info(socket, :connected) == {:connected, agent_pid}
+  end
+
+  defp client_hello_via_proxy(url) do
+    parent = self()
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, packet: 0, ip: {127, 0, 0, 1}])
+    on_exit(fn -> :gen_tcp.close(listen) end)
+    {:ok, proxy_port} = :inet.port(listen)
+
+    spawn_link(fn ->
+      case :gen_tcp.accept(listen) do
+        {:ok, socket} ->
+          _ = recv_headers(socket)
+          :ok = :gen_tcp.send(socket, "HTTP/1.1 200 Connection Established\r\n\r\n")
+
+          message =
+            case :gen_tcp.recv(socket, 0, 1_000) do
+              {:ok, hello} -> {:hello, hello}
+              {:error, reason} -> {:hello_error, reason}
+            end
+
+          send(parent, message)
+          :gen_tcp.close(socket)
+
+        {:error, reason} ->
+          send(parent, {:hello_error, reason})
+      end
+    end)
+
+    conn =
+      WebSockex.Conn.new(url,
+        insecure: true,
+        proxy: %{host: "127.0.0.1", port: proxy_port},
+        socket_connect_timeout: 1_000
+      )
+
+    _ = WebSockex.Conn.open_socket(conn)
+
+    receive do
+      {:hello, hello} -> {:ok, hello}
+      {:hello_error, reason} -> {:error, reason}
+    after
+      1_500 -> {:error, :timeout}
+    end
+  end
+
+  defp listen_ipv6 do
+    :gen_tcp.listen(0, [
+      :inet6,
+      :binary,
+      active: false,
+      packet: 0,
+      ip: {0, 0, 0, 0, 0, 0, 0, 1}
+    ])
+  end
+
+  defp accept_once(listen) do
+    case :gen_tcp.accept(listen) do
+      {:ok, socket} -> :gen_tcp.close(socket)
+      {:error, _} -> :ok
+    end
   end
 
   defp owned_port_count do
