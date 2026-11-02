@@ -47,6 +47,18 @@ dependencies if your OTP version has no OS trust store support.
 Pass `cacerts:` to supply custom CA certificates, or `ssl_options:` to control the
 TLS options directly. Pass `insecure: true` to disable verification.
 
+## IPv6
+
+Hostnames are dialed with IPv4. Pass `inet_family: :inet6` to dial them with IPv6:
+
+```elixir
+WebSockex.start_link("wss://ipv6.example/ws", MyClient, %{}, inet_family: :inet6)
+```
+
+An IPv4 or IPv6 literal selects its own family, so `ws://[::1]:8080/ws` does not
+need the option. With an HTTP CONNECT proxy, the family is the one used to reach
+the proxy. An IPv6 target reached through an IPv4 proxy keeps the default.
+
 ## Why WebSockex?
 
 WebSockex was conceived after trying other libraries and realizing that I needed something tested, that actually
